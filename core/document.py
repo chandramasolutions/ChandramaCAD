@@ -5,6 +5,7 @@ from typing import Optional
 from core.entities import (
     Entity, LineEntity, PolylineEntity, RectangleEntity,
     CircleEntity, ArcEntity, SplineEntity,
+    PolygonEntity, EllipseEntity, SemiCircleEntity, GrooveEntity,
 )
 import numpy as np
 
@@ -193,6 +194,24 @@ class Document:
                 d["end_angle"] = e.end_angle
             elif isinstance(e, SplineEntity):
                 d["control_points"] = [list(p) for p in e.control_points]
+            elif isinstance(e, PolygonEntity):
+                d["center"] = list(e.center)
+                d["n_sides"] = e.n_sides
+                d["circumradius"] = e.circumradius
+                d["rotation_deg"] = e.rotation_deg
+            elif isinstance(e, EllipseEntity):
+                d["center"] = list(e.center)
+                d["rx"] = e.rx
+                d["ry"] = e.ry
+                d["rotation_deg"] = e.rotation_deg
+            elif isinstance(e, SemiCircleEntity):
+                d["center"] = list(e.center)
+                d["radius"] = e.radius
+                d["flat_angle"] = e.flat_angle
+            elif isinstance(e, GrooveEntity):
+                d["center1"] = list(e.center1)
+                d["center2"] = list(e.center2)
+                d["radius"] = e.radius
             return d
 
         return {
@@ -225,6 +244,18 @@ class Document:
                 e = ArcEntity(np.array(ed["center"]), ed["radius"], ed["start_angle"], ed["end_angle"])
             elif t == "SplineEntity":
                 e = SplineEntity([np.array(p) for p in ed["control_points"]])
+            elif t == "PolygonEntity":
+                e = PolygonEntity(np.array(ed["center"]), ed["n_sides"],
+                                  ed["circumradius"], ed.get("rotation_deg", 90.0))
+            elif t == "EllipseEntity":
+                e = EllipseEntity(np.array(ed["center"]), ed["rx"], ed["ry"],
+                                  ed.get("rotation_deg", 0.0))
+            elif t == "SemiCircleEntity":
+                e = SemiCircleEntity(np.array(ed["center"]), ed["radius"],
+                                     ed.get("flat_angle", 0.0))
+            elif t == "GrooveEntity":
+                e = GrooveEntity(np.array(ed["center1"]), np.array(ed["center2"]),
+                                 ed["radius"])
             if e is not None:
                 e.layer = ed.get("layer", "Default")
                 e.color = ed.get("color")

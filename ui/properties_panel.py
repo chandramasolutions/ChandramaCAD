@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt
 from core.entities import (
     Entity, LineEntity, PolylineEntity, RectangleEntity,
     CircleEntity, ArcEntity, SplineEntity,
+    PolygonEntity, EllipseEntity, SemiCircleEntity, GrooveEntity,
 )
 
 
@@ -109,6 +110,48 @@ class PropertiesPanel(QWidget):
 
         elif isinstance(e, SplineEntity):
             self._add_row("Control pts", str(len(e.control_points)))
+
+        elif isinstance(e, PolygonEntity):
+            self._add_row("Sides", str(e.n_sides))
+            self._add_row("Center X", f"{e.center[0]:.3f} mm")
+            self._add_row("Center Y", f"{e.center[1]:.3f} mm")
+            self._add_row("Circumradius", f"{e.circumradius:.3f} mm")
+            inradius = e.circumradius * math.cos(math.pi / e.n_sides)
+            self._add_row("Inradius", f"{inradius:.3f} mm")
+            side_len = 2 * e.circumradius * math.sin(math.pi / e.n_sides)
+            self._add_row("Side length", f"{side_len:.3f} mm")
+            self._add_row("Rotation", f"{e.rotation_deg:.2f}°")
+
+        elif isinstance(e, EllipseEntity):
+            self._add_row("Center X", f"{e.center[0]:.3f} mm")
+            self._add_row("Center Y", f"{e.center[1]:.3f} mm")
+            self._add_row("Radius X", f"{e.rx:.3f} mm")
+            self._add_row("Radius Y", f"{e.ry:.3f} mm")
+            self._add_row("Rotation", f"{e.rotation_deg:.2f}°")
+            # Ramanujan approximation for circumference
+            h = ((e.rx - e.ry) / (e.rx + e.ry)) ** 2
+            circ = math.pi * (e.rx + e.ry) * (1 + 3 * h / (10 + math.sqrt(4 - 3 * h)))
+            self._add_row("Perimeter ≈", f"{circ:.3f} mm")
+
+        elif isinstance(e, SemiCircleEntity):
+            self._add_row("Center X", f"{e.center[0]:.3f} mm")
+            self._add_row("Center Y", f"{e.center[1]:.3f} mm")
+            self._add_row("Radius", f"{e.radius:.3f} mm")
+            self._add_row("Flat angle", f"{e.flat_angle:.2f}°")
+            self._add_row("Arc length", f"{math.pi * e.radius:.3f} mm")
+            self._add_row("Chord", f"{2 * e.radius:.3f} mm")
+
+        elif isinstance(e, GrooveEntity):
+            axis_len = float(np.linalg.norm(e.center2 - e.center1))
+            self._add_row("Center1 X", f"{e.center1[0]:.3f} mm")
+            self._add_row("Center1 Y", f"{e.center1[1]:.3f} mm")
+            self._add_row("Center2 X", f"{e.center2[0]:.3f} mm")
+            self._add_row("Center2 Y", f"{e.center2[1]:.3f} mm")
+            self._add_row("Radius", f"{e.radius:.3f} mm")
+            self._add_row("Width", f"{e.radius * 2:.3f} mm")
+            self._add_row("Axis length", f"{axis_len:.3f} mm")
+            total_len = axis_len + 2 * e.radius
+            self._add_row("Total length", f"{total_len:.3f} mm")
 
     def _add_row(self, label: str, value: str):
         lbl = QLabel(label + ":")

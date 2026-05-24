@@ -415,3 +415,286 @@ class SplineEntity(Entity):
         e.layer = self.layer
         e.color = self.color
         return e
+
+
+# ══════════════════════════════════════════════════════════
+# EXTENDED SHAPE ENTITIES
+# ══════════════════════════════════════════════════════════
+
+class PolygonEntity(Entity):
+    """Regular N-sided polygon defined by center and circumradius."""
+    def __init__(self, center: np.ndarray, n_sides: int,
+                 circumradius: float, rotation_deg: float = 90.0):
+        super().__init__()
+        self.center = np.array(center, dtype=float)
+        self.n_sides = max(3, int(n_sides))
+        self.circumradius = float(circumradius)
+        self.rotation_deg = float(rotation_deg)
+
+    def _vertices(self) -> list[np.ndarray]:
+        base = math.radians(self.rotation_deg)
+        step = 2 * math.pi / self.n_sides
+        return [
+            self.center + self.circumradius * np.array([
+                math.cos(base + i * step),
+                math.sin(base + i * step),
+            ])
+            for i in range(self.n_sides)
+        ]
+
+    def bounding_box(self):
+        pts = np.array(self._vertices())
+        return (float(pts[:, 0].min()), float(pts[:, 1].min()),
+                float(pts[:, 0].max()), float(pts[:, 1].max()))
+
+    def nearest_point(self, pt):
+        verts = self._vertices()
+        best = verts[0].copy()
+        best_dist = float(np.linalg.norm(pt - best))
+        for v in verts[1:]:
+            d = float(np.linalg.norm(pt - v))
+            if d < best_dist:
+                best_dist = d
+                best = v.copy()
+        return best
+
+    def translate(self, dx, dy):
+        self.center += [dx, dy]
+
+    def rotate(self, angle_deg, origin):
+        self.center = self._rotate_point(self.center, angle_deg, origin)
+        self.rotation_deg = (self.rotation_deg + angle_deg) % 360
+
+    def scale(self, factor, origin):
+        self.center = self._scale_point(self.center, factor, origin)
+        self.circumradius *= abs(factor)
+
+    def to_dxf(self, msp):
+        verts = [(float(v[0]), float(v[1])) for v in self._vertices()]
+        msp.add_lwpolyline(verts, close=True, dxfattribs={"layer": self.layer})
+
+    def to_points(self, n=None) -> np.ndarray:
+        verts = self._vertices()
+        return np.array(verts + [verts[0]])
+
+    def clone(self):
+        e = PolygonEntity(self.center.copy(), self.n_sides,
+                          self.circumradius, self.rotation_deg)
+        e.layer = self.layer
+        e.color = self.color
+        return e
+
+
+class EllipseEntity(Entity):
+    """Axis-aligned or rotated ellipse."""
+    def __init__(self, center: np.ndarray, rx: float, ry: float,
+                 rotation_deg: float = 0.0):
+        super().__init__()
+        self.center = np.array(center, dtype=float)
+        self.rx = float(rx)
+        self.ry = float(ry)
+        self.rotation_deg = float(rotation_deg)
+
+    def bounding_box(self):
+        pts = self.to_points(64)
+        return (float(pts[:, 0].min()), float(pts[:, 1].min()),
+                float(pts[:, 0].max()), float(pts[:, 1].max()))
+
+    def nearest_point(self, pt):
+        pts = self.to_points(128)
+        dists = np.linalg.norm(pts - pt, axis=1)
+        return pts[int(np.argmin(dists))].copy()
+
+    def translate(self, dx, dy):
+        self.center += [dx, dy]
+
+    def rotate(self, angle_deg, origin):
+        self.center = self._rotate_point(self.center, angle_deg, origin)
+        self.rotation_deg = (self.rotation_deg + angle_deg) % 360
+
+    def scale(self, factor, origin):
+        self.center = self._scale_point(self.center, factor, origin)
+        self.rx *= abs(factor)
+        self.ry *= abs(factor)
+
+    def to_dxf(self, msp):
+        rot = math.radians(self.rotation_deg)
+        major_axis = (self.rx * math.cos(rot), self.rx * math.sin(rot), 0)
+        ratio = self.ry / self.rx if self.rx > 1e-12 else 1.0
+        msp.add_ellipse(
+            center=(float(self.center[0]), float(self.center[1]), 0),
+            major_axis=major_axis,
+            ratio=ratio,
+            dxfattribs={"layer": self.layer},
+        )
+
+    def to_points(self, n=128) -> np.ndarray:
+        angles = np.linspace(0, 2 * math.pi, n, endpoint=False)
+        rot = math.radians(self.rotation_deg)
+        cos_r, sin_r = math.cos(rot), math.sin(rot)
+        xs = self.rx * np.cos(angles)
+        ys = self.ry * np.sin(angles)
+        x_rot = xs * cos_r - ys * sin_r + self.center[0]
+        y_rot = xs * sin_r + ys * cos_r + self.center[1]
+        return np.column_stack([x_rot, y_rot])
+
+    def clone(self):
+        e = EllipseEntity(self.center.copy(), self.rx, self.ry, self.rotation_deg)
+        e.layer = self.layer
+        e.color = self.color
+        return e
+
+
+class SemiCircleEntity(Entity):
+    """
+    Half-circle.  flat_angle is the angle (degrees) pointing to the flat-edge
+    start.  The arc spans flat_angle → flat_angle+180 (CCW), bump faces
+    flat_angle+90.  e.g. flat_angle=0 → horizontal flat at bottom, bump up.
+    """
+    def __init__(self, center: np.ndarray, radius: float, flat_angle: float = 0.0):
+        super().__init__()
+        self.center = np.array(center, dtype=float)
+        self.radius = float(radius)
+        self.flat_angle = float(flat_angle)
+
+    def _arc_points(self, n: int = 64) -> np.ndarray:
+        angles = np.linspace(
+            math.radians(self.flat_angle),
+            math.radians(self.flat_angle + 180),
+            max(n, 4),
+        )
+        return self.center + self.radius * np.column_stack([np.cos(angles), np.sin(angles)])
+
+    def bounding_box(self):
+        pts = self._arc_points()
+        return (float(pts[:, 0].min()), float(pts[:, 1].min()),
+                float(pts[:, 0].max()), float(pts[:, 1].max()))
+
+    def nearest_point(self, pt):
+        pts = self._arc_points()
+        dists = np.linalg.norm(pts - pt, axis=1)
+        return pts[int(np.argmin(dists))].copy()
+
+    def translate(self, dx, dy):
+        self.center += [dx, dy]
+
+    def rotate(self, angle_deg, origin):
+        self.center = self._rotate_point(self.center, angle_deg, origin)
+        self.flat_angle = (self.flat_angle + angle_deg) % 360
+
+    def scale(self, factor, origin):
+        self.center = self._scale_point(self.center, factor, origin)
+        self.radius *= abs(factor)
+
+    def to_dxf(self, msp):
+        msp.add_arc(
+            center=(float(self.center[0]), float(self.center[1]), 0),
+            radius=self.radius,
+            start_angle=self.flat_angle,
+            end_angle=(self.flat_angle + 180) % 360,
+            dxfattribs={"layer": self.layer},
+        )
+        # chord line
+        fa = math.radians(self.flat_angle)
+        fb = math.radians(self.flat_angle + 180)
+        p1 = self.center + self.radius * np.array([math.cos(fa), math.sin(fa)])
+        p2 = self.center + self.radius * np.array([math.cos(fb), math.sin(fb)])
+        msp.add_line((float(p1[0]), float(p1[1]), 0),
+                     (float(p2[0]), float(p2[1]), 0),
+                     dxfattribs={"layer": self.layer})
+
+    def to_points(self, n=64) -> np.ndarray:
+        arc = self._arc_points(n)
+        return np.vstack([arc, arc[0]])   # close with chord
+
+    def clone(self):
+        e = SemiCircleEntity(self.center.copy(), self.radius, self.flat_angle)
+        e.layer = self.layer
+        e.color = self.color
+        return e
+
+
+class GrooveEntity(Entity):
+    """
+    Slot / oblong groove: two semicircles at each end joined by parallel lines.
+    center1/center2 = semicircle centres; radius = half-width.
+    """
+    def __init__(self, center1: np.ndarray, center2: np.ndarray, radius: float):
+        super().__init__()
+        self.center1 = np.array(center1, dtype=float)
+        self.center2 = np.array(center2, dtype=float)
+        self.radius = float(radius)
+
+    def _axis_angle(self) -> float:
+        d = self.center2 - self.center1
+        return math.atan2(float(d[1]), float(d[0]))
+
+    def bounding_box(self):
+        pts = self.to_points()
+        return (float(pts[:, 0].min()), float(pts[:, 1].min()),
+                float(pts[:, 0].max()), float(pts[:, 1].max()))
+
+    def nearest_point(self, pt):
+        pts = self.to_points()
+        dists = np.linalg.norm(pts - pt, axis=1)
+        return pts[int(np.argmin(dists))].copy()
+
+    def translate(self, dx, dy):
+        self.center1 += [dx, dy]
+        self.center2 += [dx, dy]
+
+    def rotate(self, angle_deg, origin):
+        self.center1 = self._rotate_point(self.center1, angle_deg, origin)
+        self.center2 = self._rotate_point(self.center2, angle_deg, origin)
+
+    def scale(self, factor, origin):
+        self.center1 = self._scale_point(self.center1, factor, origin)
+        self.center2 = self._scale_point(self.center2, factor, origin)
+        self.radius *= abs(factor)
+
+    def to_dxf(self, msp):
+        alpha = self._axis_angle()
+        sa = math.degrees(alpha)
+        # Left cap: start cap around center1 (facing away from center2)
+        msp.add_arc(
+            center=(float(self.center1[0]), float(self.center1[1]), 0),
+            radius=self.radius,
+            start_angle=(sa + 90) % 360,
+            end_angle=(sa + 270) % 360,
+            dxfattribs={"layer": self.layer},
+        )
+        # Right cap: end cap around center2
+        msp.add_arc(
+            center=(float(self.center2[0]), float(self.center2[1]), 0),
+            radius=self.radius,
+            start_angle=(sa - 90) % 360,
+            end_angle=(sa + 90) % 360,
+            dxfattribs={"layer": self.layer},
+        )
+        # Top and bottom lines
+        perp = np.array([-math.sin(alpha), math.cos(alpha)]) * self.radius
+        for sign in (1, -1):
+            p1 = self.center1 + sign * perp
+            p2 = self.center2 + sign * perp
+            msp.add_line((float(p1[0]), float(p1[1]), 0),
+                         (float(p2[0]), float(p2[1]), 0),
+                         dxfattribs={"layer": self.layer})
+
+    def to_points(self, n=64) -> np.ndarray:
+        alpha = self._axis_angle()
+        r = self.radius
+        half = max(n // 4, 8)
+        # Left cap: arc from α+90° → α+270° (CCW, facing away from center2)
+        a1 = np.linspace(alpha + math.pi / 2, alpha + 3 * math.pi / 2, half)
+        cap1 = self.center1 + r * np.column_stack([np.cos(a1), np.sin(a1)])
+        # Right cap: arc from α-90° → α+90° (CCW, facing away from center1)
+        a2 = np.linspace(alpha - math.pi / 2, alpha + math.pi / 2, half)
+        cap2 = self.center2 + r * np.column_stack([np.cos(a2), np.sin(a2)])
+        pts = np.vstack([cap1, cap2])
+        return np.vstack([pts, pts[0]])    # closed
+
+    def clone(self):
+        e = GrooveEntity(self.center1.copy(), self.center2.copy(), self.radius)
+        e.layer = self.layer
+        e.color = self.color
+        return e

@@ -12,8 +12,12 @@ from PySide6.QtGui import QKeySequence, QAction, QFont, QShortcut
 from core.document import Document
 from core.snap_engine import SnapEngine
 from core.exporter import export_dxf, export_dat
-from ui.canvas import Canvas, TOOL_SELECT, TOOL_LINE, TOOL_POLYLINE
-from ui.canvas import TOOL_RECTANGLE, TOOL_CIRCLE, TOOL_ARC, TOOL_SPLINE
+from ui.canvas import (
+    Canvas,
+    TOOL_SELECT, TOOL_LINE, TOOL_POLYLINE, TOOL_RECTANGLE,
+    TOOL_CIRCLE, TOOL_ARC, TOOL_SPLINE,
+    TOOL_POLYGON, TOOL_ELLIPSE, TOOL_SEMICIRCLE, TOOL_GROOVE,
+)
 from ui.toolbar_panel import ToolbarPanel
 from ui.layers_panel import LayersPanel
 from ui.properties_panel import PropertiesPanel
@@ -239,6 +243,7 @@ class MainWindow(QMainWindow):
         sc("R",        lambda: self._select_tool(TOOL_RECTANGLE))
         sc("C",        lambda: self._select_tool(TOOL_CIRCLE))
         sc("A",        lambda: self._select_tool(TOOL_ARC))
+        sc("E",        lambda: self._select_tool(TOOL_ELLIPSE))
         sc("Ctrl+Z",   self._on_undo)
         sc("Ctrl+Y",   self._on_redo)
         sc("Delete",   self._on_delete_selected)
@@ -252,6 +257,7 @@ class MainWindow(QMainWindow):
 
     def _wire_signals(self):
         self.toolbar_panel.tool_selected.connect(self._select_tool)
+        self.toolbar_panel.polygon_sides.connect(self.canvas.set_polygon_sides)
         self.toolbar_panel.zoom_in_clicked.connect(self._zoom_in)
         self.toolbar_panel.zoom_out_clicked.connect(self._zoom_out)
         self.toolbar_panel.fit_clicked.connect(self.canvas.fit_to_screen)

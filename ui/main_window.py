@@ -168,11 +168,16 @@ class MainWindow(QMainWindow):
         self._lbl_snap = QLabel("Snap: Grid")
         self._lbl_zoom = QLabel("Zoom: 100%")
         self._lbl_layer = QLabel(f"Layer: {self.document.active_layer}")
+        # Per-step hint — updated by canvas.status_hint signal
+        self._lbl_hint = QLabel("Click to select · Drag to box-select · Shift+Click to add")
+        self._lbl_hint.setStyleSheet(
+            "padding: 0 10px; color: #E55A28; font-size: 12px; font-style: italic;")
 
         for lbl in (self._lbl_tool, self._lbl_cursor, self._lbl_snap,
                     self._lbl_zoom, self._lbl_layer):
             lbl.setStyleSheet("padding: 0 10px; border-right: 1px solid #E0E0E0;")
             self._status.addWidget(lbl)
+        self._status.addWidget(self._lbl_hint)
 
         brand = QLabel("◆ ChandramaCAD v1.0")
         brand.setStyleSheet("color: #E55A28; font-size: 12px; font-weight: 600; padding: 0 10px;")
@@ -307,6 +312,7 @@ class MainWindow(QMainWindow):
         self.canvas.selection_changed.connect(self._on_selection_changed)
         self.canvas.entity_added.connect(self._on_entity_added)
         self.canvas.tool_changed.connect(self._on_tool_changed)
+        self.canvas.status_hint.connect(self._lbl_hint.setText)
 
         self.layers_panel.layer_changed.connect(self._on_layer_changed)
 
@@ -643,7 +649,7 @@ class MainWindow(QMainWindow):
             for e in selected:
                 bb = e.bounding_box()
                 if bb is not None:
-                    (x0, y0), (x1, y1) = bb
+                    x0, y0, x1, y1 = bb          # 4-tuple: (min_x, min_y, max_x, max_y)
                     all_pts.append(((x0 + x1) / 2.0, (y0 + y1) / 2.0))
             if all_pts:
                 cx = sum(p[0] for p in all_pts) / len(all_pts)

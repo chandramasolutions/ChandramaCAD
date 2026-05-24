@@ -89,6 +89,7 @@ class Canvas(QWidget):
     cursor_moved      = Signal(float, float)
     zoom_changed      = Signal(float)
     tool_changed      = Signal(str)
+    status_hint       = Signal(str)       # per-step instruction for the status bar
 
     def __init__(self, document: Document, snap_engine: SnapEngine, parent=None):
         super().__init__(parent)
@@ -141,8 +142,9 @@ class Canvas(QWidget):
         self._snap_result: Optional[SnapResult] = None
         self._cursor_world = np.zeros(2)
 
-        # Pan
+        # Pan (middle-mouse or Space+drag)
         self._panning = False
+        self._space_held: bool = False
         self._pan_start_px: Optional[QPoint]   = None
         self._pan_start_offset: Optional[QPointF] = None
 
@@ -164,11 +166,41 @@ class Canvas(QWidget):
 
     # ── Public API ────────────────────────────────────────────
 
+    # Step-by-step hint shown in status bar for every tool
+    _TOOL_HINTS = {
+        TOOL_SELECT:     "Click to select · Drag to box-select · Shift+Click to add",
+        TOOL_LINE:       "Line ▶ click start point",
+        TOOL_POLYLINE:   "Polyline ▶ click points · Right-click / Enter to finish",
+        TOOL_RECTANGLE:  "Rectangle ▶ click first corner",
+        TOOL_CIRCLE:     "Circle ▶ click centre",
+        TOOL_ARC:        "Arc ▶ click centre  (3 clicks: centre → start → end)",
+        TOOL_SPLINE:     "Spline ▶ click control points · Right-click / Enter to finish",
+        TOOL_POLYGON:    "Polygon ▶ click centre",
+        TOOL_ELLIPSE:    "Ellipse ▶ click first corner of bounding box",
+        TOOL_SEMICIRCLE: "Semi-circle ▶ click centre",
+        TOOL_GROOVE:     "Groove ▶ click first centre  (3 clicks: c1 → c2 → radius)",
+        TOOL_POINT:      "Point ▶ click to place",
+        TOOL_MOVE:       "Move ▶ click base point  (select entities first, or click entity)",
+        TOOL_COPY_TOOL:  "Copy ▶ click base point  (select entities first, or click entity)",
+        TOOL_ROTATE:     "Rotate ▶ click pivot  (select entities first)",
+        TOOL_MIRROR:     "Mirror ▶ click axis start  (select entities first)",
+        TOOL_OFFSET:     "Offset ▶ click entity to offset",
+        TOOL_TRIM:       "Trim ▶ click segment to remove",
+        TOOL_EXTEND:     "Extend ▶ click line to extend · then click boundary",
+        TOOL_FILLET:     "Fillet ▶ click first line",
+        TOOL_CHAMFER:    "Chamfer ▶ click first line",
+        TOOL_BREAK:      "Break ▶ click entity at break point",
+        TOOL_TEXT:       "Text ▶ click insertion point",
+        TOOL_DIM_LINEAR: "Linear Dim ▶ click first point",
+        TOOL_DIM_RADIAL: "Radial Dim ▶ click a circle or arc",
+    }
+
     def set_tool(self, tool: str):
         self._cancel_tool()
         self._tool = tool
         self.setCursor(Qt.ArrowCursor if tool == TOOL_SELECT else Qt.CrossCursor)
         self.tool_changed.emit(tool)
+        self.status_hint.emit(self._TOOL_HINTS.get(tool, ""))
         self.update()
 
     def set_polygon_sides(self, n: int):
@@ -826,10 +858,42 @@ class Canvas(QWidget):
     def _draw_tool_preview(self, painter: QPainter):
         dash_pen = QPen(QColor("#E55A28"), 1.5, Qt.DashLine)
         dash_pen.setCosmetic(True)
-        painter.setPen(dash_pen)
-        painter.setBrush(Qt.NoBrush)
         cur = self._snap_result.point if self._snap_result else self._cursor_world
         t   = self._tool
+
+        # ── Dot markers for every committed intermediate point ──────────
+        dot_pen = QPen(QColor("#E55A28"), 1.5)
+        dot_pen.setCosmetic(True)
+        dot_brush = QBrush(QColor("#E55A28"))
+        blue_pen   = QPen(QColor("#2266BB"), 1.5)
+        blue_pen.setCosmetic(True)
+        blue_brush = QBrush(QColor("#2266BB"))
+        dim_brush  = QBrush(_DIM_COLOR)
+
+        def _dot(pt, pen=dot_pen, brush=dot_brush, r=4.5):
+            sp = self.world_to_screen(float(pt[0]), float(pt[1]))
+            painter.setPen(pen)
+            painter.setBrush(brush)
+            painter.drawEllipse(sp, r, r)
+
+        for pt in self._tool_points:
+            _dot(pt)
+        if self._arc_center is not None:
+            _dot(self._arc_center)
+        if self._groove_c1 is not None:
+            _dot(self._groove_c1)
+        if self._groove_c2 is not None:
+            _dot(self._groove_c2)
+        if self._mod_base is not None:
+            _dot(self._mod_base, blue_pen, blue_brush)
+        if self._dim_p1 is not None:
+            _dot(self._dim_p1, QPen(_DIM_COLOR, 1.5), dim_brush)
+        if self._dim_p2 is not None:
+            _dot(self._dim_p2, QPen(_DIM_COLOR, 1.5), dim_brush)
+
+        # ── Dashed preview geometry ─────────────────────────────────────
+        painter.setPen(dash_pen)
+        painter.setBrush(Qt.NoBrush)
 
         # ── Drawing tools ─────────────────────────────────
         if t == TOOL_LINE and self._tool_points:
@@ -1061,9 +1125,10 @@ class Canvas(QWidget):
 
         if event.button() == Qt.MiddleButton:
             self._start_pan(pos.toPoint()); return
-        if event.button() == Qt.LeftButton and \
-                QApplication.keyboardModifiers() & Qt.Key_Space:
+        if event.button() == Qt.LeftButton and self._space_held:
             self._start_pan(pos.toPoint()); return
+        if event.button() == Qt.RightButton:
+            self._on_right_click(); return
         if event.button() == Qt.LeftButton:
             self._handle_left_click(snapped, world, pos.toPoint(), event.modifiers())
 
@@ -1129,9 +1194,51 @@ class Canvas(QWidget):
         self.update()
 
     def keyPressEvent(self, event: QKeyEvent):
-        if event.key() == Qt.Key_Escape:
+        k = event.key()
+        if k == Qt.Key_Escape:
             self._cancel_tool()
             self.set_tool(TOOL_SELECT)
+        elif k == Qt.Key_Space and not event.isAutoRepeat():
+            self._space_held = True
+            self.setCursor(Qt.OpenHandCursor)
+        elif k in (Qt.Key_Return, Qt.Key_Enter):
+            # Enter/Return finishes polyline or spline in progress
+            if self._tool == TOOL_POLYLINE and len(self._tool_points) >= 2:
+                self._finish_polyline()
+            elif self._tool == TOOL_SPLINE and len(self._tool_points) >= 2:
+                self._finish_spline()
+
+    def keyReleaseEvent(self, event: QKeyEvent):
+        if event.key() == Qt.Key_Space and not event.isAutoRepeat():
+            self._space_held = False
+            if not self._panning:
+                self.setCursor(
+                    Qt.ArrowCursor if self._tool == TOOL_SELECT else Qt.CrossCursor)
+
+    # ── Right-click cancel / finish ───────────────────────────
+
+    def _on_right_click(self):
+        """
+        Right-click behaviour:
+          • Polyline / Spline with ≥ 2 points  → commit (finish)
+          • Any other in-progress multi-step tool → cancel back to step 0
+          • Tool in idle state                   → return to Select
+        """
+        if self._tool == TOOL_POLYLINE and len(self._tool_points) >= 2:
+            self._finish_polyline()
+            self.status_hint.emit(self._TOOL_HINTS.get(TOOL_POLYLINE, ""))
+        elif self._tool == TOOL_SPLINE and len(self._tool_points) >= 2:
+            self._finish_spline()
+            self.status_hint.emit(self._TOOL_HINTS.get(TOOL_SPLINE, ""))
+        elif self._tool_points or self._arc_step or self._groove_step \
+                or self._mod_step or self._dim_step:
+            # In-progress op → cancel to start of same tool
+            self._cancel_tool()
+            self.status_hint.emit(self._TOOL_HINTS.get(self._tool, ""))
+        else:
+            # Idle → return to Select
+            self.set_tool(TOOL_SELECT)
+        self.update()
 
     # ── Tool click dispatch ───────────────────────────────────
 
@@ -1145,27 +1252,40 @@ class Canvas(QWidget):
         # ── Drawing ───────────────────────────────────────
         elif t == TOOL_POINT:
             self._commit(PointEntity(snapped.copy()))
+            self.status_hint.emit("Point placed · click to place another")
 
         elif t == TOOL_LINE:
             if not self._tool_points:
                 self._tool_points = [snapped.copy()]
+                self.status_hint.emit("Line ▶ click end point  (Right-click to cancel)")
             else:
                 self._commit(LineEntity(self._tool_points[0], snapped))
                 self._tool_points = []
+                self.status_hint.emit("Line ▶ click start point")
 
         elif t == TOOL_POLYLINE:
             self._tool_points.append(snapped.copy())
+            n = len(self._tool_points)
+            if n == 1:
+                self.status_hint.emit(
+                    "Polyline ▶ click next point  (Right-click / Enter to finish)")
+            else:
+                self.status_hint.emit(
+                    f"Polyline ▶ {n} pts · click next  (Right-click / Enter to finish)")
 
         elif t == TOOL_RECTANGLE:
             if not self._tool_points:
                 self._tool_points = [snapped.copy()]
+                self.status_hint.emit("Rectangle ▶ click opposite corner")
             else:
                 self._commit(RectangleEntity(self._tool_points[0], snapped))
                 self._tool_points = []
+                self.status_hint.emit("Rectangle ▶ click first corner")
 
         elif t == TOOL_ELLIPSE:
             if not self._tool_points:
                 self._tool_points = [snapped.copy()]
+                self.status_hint.emit("Ellipse ▶ click opposite corner of bounding box")
             else:
                 c1 = self._tool_points[0]
                 center = (c1 + snapped) / 2
@@ -1174,25 +1294,36 @@ class Canvas(QWidget):
                 if rx > 1e-6 and ry > 1e-6:
                     self._commit(EllipseEntity(center, rx, ry))
                 self._tool_points = []
+                self.status_hint.emit("Ellipse ▶ click first corner of bounding box")
 
         elif t == TOOL_CIRCLE:
             if not self._tool_points:
                 self._tool_points = [snapped.copy()]
+                self.status_hint.emit("Circle ▶ click to set radius")
             else:
                 r = float(np.linalg.norm(snapped - self._tool_points[0]))
                 if r > 1e-6:
                     self._commit(CircleEntity(self._tool_points[0], r))
                 self._tool_points = []
+                self.status_hint.emit("Circle ▶ click centre")
 
         elif t == TOOL_ARC:
             self._handle_arc_click(snapped)
 
         elif t == TOOL_SPLINE:
             self._tool_points.append(snapped.copy())
+            n = len(self._tool_points)
+            if n == 1:
+                self.status_hint.emit(
+                    "Spline ▶ click next control point  (Right-click / Enter to finish)")
+            else:
+                self.status_hint.emit(
+                    f"Spline ▶ {n} pts · click next  (Right-click / Enter to finish)")
 
         elif t == TOOL_POLYGON:
             if not self._tool_points:
                 self._tool_points = [snapped.copy()]
+                self.status_hint.emit("Polygon ▶ click to set circumradius")
             else:
                 center = self._tool_points[0]
                 r = float(np.linalg.norm(snapped - center))
@@ -1201,10 +1332,12 @@ class Canvas(QWidget):
                                                   float(snapped[0]-center[0])))
                     self._commit(PolygonEntity(center, self._polygon_sides, r, rot))
                 self._tool_points = []
+                self.status_hint.emit("Polygon ▶ click centre")
 
         elif t == TOOL_SEMICIRCLE:
             if not self._tool_points:
                 self._tool_points = [snapped.copy()]
+                self.status_hint.emit("Semi-circle ▶ click to set radius")
             else:
                 center = self._tool_points[0]
                 r = float(np.linalg.norm(snapped - center))
@@ -1213,6 +1346,7 @@ class Canvas(QWidget):
                                                    float(snapped[0]-center[0])))
                     self._commit(SemiCircleEntity(center, r, (bump - 90) % 360))
                 self._tool_points = []
+                self.status_hint.emit("Semi-circle ▶ click centre")
 
         elif t == TOOL_GROOVE:
             self._handle_groove_click(snapped)
@@ -1222,38 +1356,96 @@ class Canvas(QWidget):
 
         # ── Modify ────────────────────────────────────────
         elif t in (TOOL_MOVE, TOOL_COPY_TOOL):
+            prev_step = self._mod_step
             self._handle_move_click(snapped)
+            if prev_step == 0 and self._mod_step == 1:
+                verb = "Copy" if t == TOOL_COPY_TOOL else "Move"
+                self.status_hint.emit(f"{verb} ▶ click destination point")
+            elif self._mod_step == 0:
+                verb = "Copy" if t == TOOL_COPY_TOOL else "Move"
+                self.status_hint.emit(
+                    f"{verb} ▶ click base point  (select entities first)")
 
         elif t == TOOL_ROTATE:
+            prev_step = self._mod_step
             self._handle_rotate_click(snapped, raw_world)
+            if prev_step == 0 and self._mod_step == 1:
+                self.status_hint.emit("Rotate ▶ click to set angle")
+            else:
+                self.status_hint.emit(
+                    "Rotate ▶ click pivot  (select entities first)")
 
         elif t == TOOL_MIRROR:
+            prev_step = self._mod_step
             self._handle_mirror_click(snapped)
+            if prev_step == 0 and self._mod_step == 1:
+                self.status_hint.emit("Mirror ▶ click second axis point")
+            else:
+                self.status_hint.emit(
+                    "Mirror ▶ click axis start  (select entities first)")
 
         elif t == TOOL_OFFSET:
+            prev_step = self._mod_step
             self._handle_offset_click(snapped, raw_world)
+            if prev_step == 0 and self._mod_step == 1:
+                self.status_hint.emit("Offset ▶ click side to offset towards")
+            else:
+                self.status_hint.emit("Offset ▶ click entity to offset")
 
         elif t == TOOL_TRIM:
             self._handle_trim_click(snapped)
+            self.status_hint.emit("Trim ▶ click segment to remove")
 
         elif t == TOOL_EXTEND:
+            prev_step = self._mod_step
             self._handle_extend_click(snapped)
+            if prev_step == 0 and self._mod_step == 1:
+                self.status_hint.emit("Extend ▶ click target boundary")
+            else:
+                self.status_hint.emit("Extend ▶ click line to extend")
 
         elif t == TOOL_FILLET:
+            prev_step = self._mod_step
             self._handle_fillet_click(snapped)
+            if prev_step == 0 and self._mod_step == 1:
+                self.status_hint.emit(
+                    "Fillet ▶ click second line  (radius prompt will follow)")
+            else:
+                self.status_hint.emit("Fillet ▶ click first line")
 
         elif t == TOOL_CHAMFER:
+            prev_step = self._mod_step
             self._handle_chamfer_click(snapped)
+            if prev_step == 0 and self._mod_step == 1:
+                self.status_hint.emit(
+                    "Chamfer ▶ click second line  (distances prompt will follow)")
+            else:
+                self.status_hint.emit("Chamfer ▶ click first line")
 
         elif t == TOOL_BREAK:
             self._handle_break_click(snapped)
+            self.status_hint.emit("Break ▶ click entity at break point")
 
         # ── Annotation ────────────────────────────────────
         elif t == TOOL_DIM_LINEAR:
+            prev_step = self._dim_step
             self._handle_dim_linear_click(snapped)
+            if prev_step == 0:
+                self.status_hint.emit("Linear Dim ▶ click second point")
+            elif prev_step == 1:
+                self.status_hint.emit(
+                    "Linear Dim ▶ click offset position for dimension line")
+            else:
+                self.status_hint.emit("Linear Dim ▶ click first point")
 
         elif t == TOOL_DIM_RADIAL:
+            prev_step = self._dim_step
             self._handle_dim_radial_click(snapped)
+            if prev_step == 0 and self._dim_step == 1:
+                self.status_hint.emit(
+                    "Radial Dim ▶ click to set leader angle")
+            else:
+                self.status_hint.emit("Radial Dim ▶ click a circle or arc")
 
         self.update()
 
@@ -1291,12 +1483,14 @@ class Canvas(QWidget):
     def _handle_arc_click(self, snapped):
         if self._arc_step == 0:
             self._arc_center = snapped.copy(); self._arc_step = 1
+            self.status_hint.emit("Arc ▶ click to set radius & start angle")
         elif self._arc_step == 1:
             self._arc_radius = float(np.linalg.norm(snapped - self._arc_center))
             self._arc_start_angle = math.degrees(
                 math.atan2(float(snapped[1]-self._arc_center[1]),
                            float(snapped[0]-self._arc_center[0]))) % 360
             self._arc_step = 2
+            self.status_hint.emit("Arc ▶ click to set end angle")
         elif self._arc_step == 2:
             ea = math.degrees(math.atan2(float(snapped[1]-self._arc_center[1]),
                                          float(snapped[0]-self._arc_center[0]))) % 360
@@ -1304,14 +1498,17 @@ class Canvas(QWidget):
                 self._commit(ArcEntity(self._arc_center, self._arc_radius,
                                        self._arc_start_angle, ea))
             self._arc_step = 0; self._arc_center = None
+            self.status_hint.emit("Arc ▶ click centre")
 
     # ── Groove ────────────────────────────────────────────────
 
     def _handle_groove_click(self, snapped):
         if self._groove_step == 0:
             self._groove_c1 = snapped.copy(); self._groove_step = 1
+            self.status_hint.emit("Groove ▶ click second centre")
         elif self._groove_step == 1:
             self._groove_c2 = snapped.copy(); self._groove_step = 2
+            self.status_hint.emit("Groove ▶ click to set width (drag perpendicular)")
         elif self._groove_step == 2:
             c1, c2 = self._groove_c1, self._groove_c2
             axis = c2 - c1
@@ -1321,6 +1518,7 @@ class Canvas(QWidget):
                 r    = max(abs(float(np.dot(snapped - (c1+c2)/2, perp))), 0.5)
                 self._commit(GrooveEntity(c1, c2, r))
             self._groove_step = 0; self._groove_c1 = self._groove_c2 = None
+            self.status_hint.emit("Groove ▶ click first centre")
 
     # ── Text ──────────────────────────────────────────────────
 
@@ -1862,8 +2060,9 @@ class Canvas(QWidget):
     # ── Commit / Helpers ──────────────────────────────────────
 
     def _commit(self, entity: Entity):
+        """Add entity with a single, clean undo snapshot."""
         snap = self.document.begin_operation()
-        self.document.add_entity(entity)
+        self.document.add_entity(entity, push_undo=False)   # snapshot handled by commit
         self.document.commit_operation(snap)
         self.entity_added.emit(entity)
 

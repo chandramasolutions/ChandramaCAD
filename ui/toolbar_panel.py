@@ -68,6 +68,7 @@ class ToolbarPanel(QWidget):
     zoom_in_clicked  = Signal()
     zoom_out_clicked = Signal()
     fit_clicked      = Signal()
+    scale_clicked    = Signal()        # emits when Scale action is triggered
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -154,6 +155,13 @@ class ToolbarPanel(QWidget):
         for _, tid, _ in _ROUND_ITEMS:
             self._buttons[tid] = self._round_btn
         layout.addWidget(self._round_btn)
+
+        layout.addWidget(self._separator())
+
+        # ── Actions ────────────────────────────────────────
+        scale_btn = self._make_btn("⇲", "Scale selection  [Alt+S]", font)
+        scale_btn.clicked.connect(self.scale_clicked)
+        layout.addWidget(scale_btn)
 
         layout.addWidget(self._separator())
 

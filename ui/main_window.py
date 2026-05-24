@@ -1,13 +1,15 @@
 from __future__ import annotations
 import os
+import numpy as np
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QLabel, QSplitter, QStatusBar, QMenuBar, QMenu,
     QToolButton, QFileDialog, QMessageBox, QFrame,
-    QSizePolicy,
+    QSizePolicy, QDialog, QFormLayout, QDoubleSpinBox,
+    QPushButton,
 )
 from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QKeySequence, QAction, QFont, QShortcut
+from PySide6.QtGui import QKeySequence, QAction, QFont, QShortcut, QPixmap
 
 from core.document import Document
 from core.snap_engine import SnapEngine
@@ -22,6 +24,7 @@ from ui.toolbar_panel import ToolbarPanel
 from ui.layers_panel import LayersPanel
 from ui.properties_panel import PropertiesPanel
 from ui.about_dialog import AboutDialog
+from ui.scale_dialog import ScaleDialog
 
 
 class MainWindow(QMainWindow):
@@ -187,6 +190,8 @@ class MainWindow(QMainWindow):
         self._act_export_dxf = QAction("Export DXF…", self)
         self._act_export_dxf.setShortcut(QKeySequence("Ctrl+E"))
         self._act_export_dat = QAction("Export DAT…", self)
+        self._act_insert_image = QAction("Insert Image…", self)
+        self._act_insert_image.setShortcut(QKeySequence("Ctrl+I"))
         self._act_exit = QAction("Exit", self)
         self._act_exit.setShortcut(QKeySequence("Alt+F4"))
 
@@ -198,6 +203,8 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(self._act_export_dxf)
         file_menu.addAction(self._act_export_dat)
+        file_menu.addSeparator()
+        file_menu.addAction(self._act_insert_image)
         file_menu.addSeparator()
         file_menu.addAction(self._act_exit)
 
@@ -217,6 +224,7 @@ class MainWindow(QMainWindow):
         self._act_save_as.triggered.connect(self._on_save_as)
         self._act_export_dxf.triggered.connect(self._on_export_dxf)
         self._act_export_dat.triggered.connect(self._on_export_dat)
+        self._act_insert_image.triggered.connect(self._on_insert_image)
         self._act_exit.triggered.connect(self.close)
         self._act_about.triggered.connect(self._on_about)
 
@@ -252,6 +260,8 @@ class MainWindow(QMainWindow):
         sc("F",        self.canvas.fit_to_screen)
         sc("+",        self._zoom_in)
         sc("-",        self._zoom_out)
+        sc("Alt+S",    self._on_scale_selection)
+        sc("Ctrl+I",   self._on_insert_image)
 
     # ── Signal wiring ─────────────────────────────────────
 
@@ -261,6 +271,7 @@ class MainWindow(QMainWindow):
         self.toolbar_panel.zoom_in_clicked.connect(self._zoom_in)
         self.toolbar_panel.zoom_out_clicked.connect(self._zoom_out)
         self.toolbar_panel.fit_clicked.connect(self.canvas.fit_to_screen)
+        self.toolbar_panel.scale_clicked.connect(self._on_scale_selection)
 
         self.canvas.cursor_moved.connect(self._on_cursor_moved)
         self.canvas.zoom_changed.connect(self._on_zoom_changed)
@@ -318,13 +329,14 @@ class MainWindow(QMainWindow):
             self._update_title()
 
     def _on_delete_selected(self):
+        self.canvas.remove_selected_images()
         selected = self.document.selected_entities()
         if selected:
             ids = [e.id for e in selected]
             self.document.remove_entities(ids)
-            self.canvas.update()
             self.properties_panel.show_entities([])
             self._update_title()
+        self.canvas.update()
 
     def _toggle_grid(self):
         self.canvas.grid_visible = not self.canvas.grid_visible
@@ -369,11 +381,12 @@ class MainWindow(QMainWindow):
         self.snap_engine = SnapEngine()
         self.canvas.document = self.document
         self.canvas.snap_engine = self.snap_engine
+        self.canvas._images.clear()
         self.layers_panel.document = self.document
         self.layers_panel.refresh()
         self.properties_panel.show_entities([])
         self._project_path = None
-        self.canvas.update()
+        self.canvas.center_origin()
         self._update_title()
 
     def _on_open(self):
@@ -453,6 +466,130 @@ class MainWindow(QMainWindow):
                                     f"DAT exported to:\n{path}")
         except Exception as ex:
             QMessageBox.critical(self, "Export Error", str(ex))
+
+    def _on_insert_image(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Insert Reference Image", "",
+            "Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp);;All Files (*)"
+        )
+        if not path:
+            return
+
+        # Check the image loads correctly
+        pix = QPixmap(path)
+        if pix.isNull():
+            QMessageBox.critical(self, "Image Error", f"Cannot load image:\n{path}")
+            return
+
+        # Ask for real-world width and opacity
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Image Scale & Opacity")
+        dlg.setModal(True)
+        dlg.setMinimumWidth(280)
+        dlg.setStyleSheet(
+            "QDialog { background: #F8F9FA; }"
+            "QLabel { color: #1A1A24; font-size: 13px; }"
+            "QDoubleSpinBox { background: #FFFFFF; border: 1px solid #E0E0E0; "
+            "border-radius: 3px; padding: 4px 8px; font-size: 13px; color: #1A1A24; }"
+        )
+        form = QFormLayout(dlg)
+        form.setContentsMargins(16, 16, 16, 16)
+        form.setSpacing(10)
+
+        width_spin = QDoubleSpinBox()
+        width_spin.setRange(0.1, 100000.0)
+        width_spin.setDecimals(2)
+        width_spin.setValue(100.0)
+        width_spin.setSuffix(" mm")
+        form.addRow("Real width:", width_spin)
+
+        opacity_spin = QDoubleSpinBox()
+        opacity_spin.setRange(0.05, 1.0)
+        opacity_spin.setDecimals(2)
+        opacity_spin.setSingleStep(0.05)
+        opacity_spin.setValue(0.5)
+        form.addRow("Opacity:", opacity_spin)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        ok_btn = QPushButton("Insert")
+        ok_btn.setDefault(True)
+        ok_btn.setStyleSheet(
+            "QPushButton { background: #E55A28; color: #FFFFFF; border: none; "
+            "border-radius: 4px; padding: 6px 18px; font-size: 13px; font-weight: 600; }"
+            "QPushButton:hover { background: #CC4D22; }"
+        )
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setStyleSheet(
+            "QPushButton { background: #FFFFFF; color: #1A1A24; border: 1px solid #E0E0E0; "
+            "border-radius: 4px; padding: 6px 18px; font-size: 13px; }"
+            "QPushButton:hover { background: #F0F2F5; }"
+        )
+        ok_btn.clicked.connect(dlg.accept)
+        cancel_btn.clicked.connect(dlg.reject)
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(ok_btn)
+        form.addRow(btn_row)
+
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        real_w_mm = width_spin.value()
+        opacity   = opacity_spin.value()
+
+        # Compute height preserving aspect ratio
+        aspect    = pix.height() / max(pix.width(), 1)
+        real_h_mm = real_w_mm * aspect
+
+        # Place image centred at world origin (top-left = (-w/2, h/2))
+        world_x = -real_w_mm / 2.0
+        world_y =  real_h_mm / 2.0
+
+        try:
+            self.canvas.add_image(path, world_x, world_y, real_w_mm, real_h_mm, opacity)
+        except ValueError as ex:
+            QMessageBox.critical(self, "Image Error", str(ex))
+
+    def _on_scale_selection(self):
+        selected = self.document.selected_entities()
+        has_sel  = bool(selected)
+        dlg = ScaleDialog(has_selection=has_sel, parent=self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        factor = dlg.factor
+        if factor == 1.0:
+            return
+
+        if not selected:
+            QMessageBox.information(self, "Scale", "No entities selected. Select entities first.")
+            return
+
+        # Compute pivot
+        if dlg.pivot_is_selection_center:
+            all_pts = []
+            for e in selected:
+                bb = e.bounding_box()
+                if bb is not None:
+                    (x0, y0), (x1, y1) = bb
+                    all_pts.append(((x0 + x1) / 2.0, (y0 + y1) / 2.0))
+            if all_pts:
+                cx = sum(p[0] for p in all_pts) / len(all_pts)
+                cy = sum(p[1] for p in all_pts) / len(all_pts)
+                pivot = np.array([cx, cy])
+            else:
+                pivot = np.array([0.0, 0.0])
+        else:
+            pivot = np.array([0.0, 0.0])
+
+        snap = self.document.begin_operation()
+        for e in selected:
+            e.scale(factor, pivot)
+        self.document.commit_operation(snap)
+
+        self.canvas.update()
+        self.properties_panel.show_entities(selected)
+        self._update_title()
 
     def _on_about(self):
         dlg = AboutDialog(self)

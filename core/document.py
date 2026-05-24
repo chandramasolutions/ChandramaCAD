@@ -12,17 +12,32 @@ import numpy as np
 
 
 class Layer:
-    def __init__(self, name: str, color: str = "#1A1A24", visible: bool = True):
+    def __init__(self, name: str, color: str = "#1A1A24", visible: bool = True,
+                 linetype: str = "CONTINUOUS", lineweight: int = -3):
         self.name = name
         self.color = color
         self.visible = visible
+        self.linetype = linetype      # DXF linetype name
+        self.lineweight = lineweight  # DXF lineweight in 100ths of mm (-3 = BYLAYER default)
 
     def to_dict(self):
-        return {"name": self.name, "color": self.color, "visible": self.visible}
+        return {
+            "name":       self.name,
+            "color":      self.color,
+            "visible":    self.visible,
+            "linetype":   self.linetype,
+            "lineweight": self.lineweight,
+        }
 
     @staticmethod
     def from_dict(d):
-        return Layer(d["name"], d.get("color", "#1A1A24"), d.get("visible", True))
+        return Layer(
+            d["name"],
+            d.get("color", "#1A1A24"),
+            d.get("visible", True),
+            d.get("linetype", "CONTINUOUS"),
+            d.get("lineweight", -3),
+        )
 
 
 class Document:
@@ -175,7 +190,12 @@ class Document:
 
     def to_dict(self) -> dict:
         def entity_to_dict(e: Entity) -> dict:
-            d: dict = {"type": type(e).__name__, "layer": e.layer, "color": e.color}
+            d: dict = {
+                "type":     type(e).__name__,
+                "layer":    e.layer,
+                "color":    e.color,
+                "linetype": getattr(e, "linetype", "CONTINUOUS"),
+            }
             if isinstance(e, LineEntity):
                 d["start"] = list(e.start)
                 d["end"] = list(e.end)
@@ -285,8 +305,9 @@ class Document:
                 e = DimRadialEntity(np.array(ed["center"]), ed["radius"],
                                     ed.get("angle_deg", 0.0), ed.get("is_diameter", False))
             if e is not None:
-                e.layer = ed.get("layer", "Default")
-                e.color = ed.get("color")
+                e.layer    = ed.get("layer", "Default")
+                e.color    = ed.get("color")
+                e.linetype = ed.get("linetype", "CONTINUOUS")
             return e
 
         for ed in d.get("entities", []):

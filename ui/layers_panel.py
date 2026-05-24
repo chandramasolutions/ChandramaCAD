@@ -2,11 +2,12 @@ from __future__ import annotations
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QListWidget,
     QListWidgetItem, QLabel, QInputDialog, QColorDialog, QMessageBox,
-    QSizePolicy,
+    QSizePolicy, QComboBox,
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QPixmap
 from core.document import Document, Layer
+from core.color_utils import LINETYPE_LABELS
 
 
 class LayersPanel(QWidget):
@@ -68,6 +69,25 @@ class LayersPanel(QWidget):
         btn_row.addStretch()
         layout.addLayout(btn_row)
 
+        # ── Linetype selector for active layer ────────────────
+        lt_row = QHBoxLayout()
+        lt_row.setSpacing(4)
+        lt_lbl = QLabel("Linetype:")
+        lt_lbl.setStyleSheet("font-size: 11px; color: #5A5A6A;")
+        lt_row.addWidget(lt_lbl)
+
+        self._lt_combo = QComboBox()
+        self._lt_combo.setStyleSheet(
+            "QComboBox { background: #FFFFFF; border: 1px solid #E0E0E0; "
+            "border-radius: 3px; padding: 2px 6px; font-size: 11px; color: #1A1A24; }"
+            "QComboBox:focus { border-color: #E55A28; }"
+        )
+        for lt_name, lt_label in LINETYPE_LABELS.items():
+            self._lt_combo.addItem(lt_label, userData=lt_name)
+        self._lt_combo.currentIndexChanged.connect(self._on_linetype_changed)
+        lt_row.addWidget(self._lt_combo, stretch=1)
+        layout.addLayout(lt_row)
+
         self.refresh()
 
     def refresh(self):
@@ -92,6 +112,17 @@ class LayersPanel(QWidget):
                 item.setForeground(QColor("#AAAAAA"))
 
             self._list.addItem(item)
+
+        # Sync linetype ComboBox to active layer
+        active = self.document.get_layer(self.document.active_layer)
+        if active:
+            lt = getattr(active, "linetype", "CONTINUOUS")
+            # block signals while updating
+            self._lt_combo.blockSignals(True)
+            idx = self._lt_combo.findData(lt)
+            if idx >= 0:
+                self._lt_combo.setCurrentIndex(idx)
+            self._lt_combo.blockSignals(False)
 
     def _on_item_clicked(self, item: QListWidgetItem):
         name = item.data(Qt.UserRole)
@@ -158,3 +189,14 @@ class LayersPanel(QWidget):
         self.document.toggle_layer_visibility(name)
         self.refresh()
         self.layer_changed.emit()
+
+    def _on_linetype_changed(self, index: int):
+        lt = self._lt_combo.itemData(index)
+        if not lt:
+            return
+        active_layer = self.document.get_layer(self.document.active_layer)
+        if active_layer and active_layer.linetype != lt:
+            snap = self.document.begin_operation()
+            active_layer.linetype = lt
+            self.document.commit_operation(snap)
+            self.layer_changed.emit()

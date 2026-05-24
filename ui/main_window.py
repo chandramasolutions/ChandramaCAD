@@ -13,7 +13,11 @@ from PySide6.QtGui import QKeySequence, QAction, QFont, QShortcut, QPixmap
 
 from core.document import Document
 from core.snap_engine import SnapEngine
-from core.exporter import export_dxf, export_dat
+from core.exporter import export_dxf, export_dat, export_svg, export_pdf
+from core.dxf_importer import import_dxf
+from core.dat_importer import import_dat
+from core.path_validator import validate_cut_path
+from core.gcode_exporter import export_gcode
 from ui.canvas import (
     Canvas,
     TOOL_SELECT, TOOL_LINE, TOOL_POLYLINE, TOOL_RECTANGLE,
@@ -31,6 +35,8 @@ from ui.properties_panel import PropertiesPanel
 from ui.about_dialog import AboutDialog
 from ui.scale_dialog import ScaleDialog
 from ui.array_dialog import ArrayDialog
+from ui.kerf_dialog import KerfDialog
+from ui.units_dialog import UnitsDialog
 
 
 class MainWindow(QMainWindow):
@@ -136,6 +142,14 @@ class MainWindow(QMainWindow):
         self._btn_file = self._menu_button("File")
         layout.addWidget(self._btn_file)
 
+        # Hotwire menu button
+        self._btn_hotwire = self._menu_button("Hotwire")
+        layout.addWidget(self._btn_hotwire)
+
+        # View menu button
+        self._btn_view = self._menu_button("View")
+        layout.addWidget(self._btn_view)
+
         # Help menu button
         self._btn_help = self._menu_button("Help")
         layout.addWidget(self._btn_help)
@@ -186,21 +200,32 @@ class MainWindow(QMainWindow):
     # ── Menus ─────────────────────────────────────────────
 
     def _build_menus(self):
-        # File menu
-        file_menu = QMenu("File", self)
-        file_menu.setStyleSheet(self._menu_style())
+        ms = self._menu_style()
 
-        self._act_new = QAction("New Project", self)
+        # ── File menu ────────────────────────────────────────
+        file_menu = QMenu("File", self)
+        file_menu.setStyleSheet(ms)
+
+        self._act_new      = QAction("New Project", self)
         self._act_new.setShortcut(QKeySequence("Ctrl+N"))
-        self._act_open = QAction("Open Project…", self)
+        self._act_open     = QAction("Open Project…", self)
         self._act_open.setShortcut(QKeySequence("Ctrl+O"))
-        self._act_save = QAction("Save Project", self)
+        self._act_save     = QAction("Save Project", self)
         self._act_save.setShortcut(QKeySequence("Ctrl+S"))
-        self._act_save_as = QAction("Save Project As…", self)
+        self._act_save_as  = QAction("Save Project As…", self)
         self._act_save_as.setShortcut(QKeySequence("Ctrl+Shift+S"))
+
+        # Import
+        self._act_import_dxf = QAction("Import DXF…", self)
+        self._act_import_dat = QAction("Import DAT (Airfoil)…", self)
+
+        # Export
         self._act_export_dxf = QAction("Export DXF…", self)
         self._act_export_dxf.setShortcut(QKeySequence("Ctrl+E"))
         self._act_export_dat = QAction("Export DAT…", self)
+        self._act_export_svg = QAction("Export SVG…", self)
+        self._act_export_pdf = QAction("Export PDF…", self)
+
         self._act_insert_image = QAction("Insert Image…", self)
         self._act_insert_image.setShortcut(QKeySequence("Ctrl+I"))
         self._act_exit = QAction("Exit", self)
@@ -212,8 +237,15 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self._act_save)
         file_menu.addAction(self._act_save_as)
         file_menu.addSeparator()
+        file_menu.addSection("Import")
+        file_menu.addAction(self._act_import_dxf)
+        file_menu.addAction(self._act_import_dat)
+        file_menu.addSeparator()
+        file_menu.addSection("Export")
         file_menu.addAction(self._act_export_dxf)
         file_menu.addAction(self._act_export_dat)
+        file_menu.addAction(self._act_export_svg)
+        file_menu.addAction(self._act_export_pdf)
         file_menu.addSeparator()
         file_menu.addAction(self._act_insert_image)
         file_menu.addSeparator()
@@ -221,22 +253,54 @@ class MainWindow(QMainWindow):
 
         self._btn_file.setMenu(file_menu)
 
-        # Help menu
+        # ── Hotwire menu ─────────────────────────────────────
+        hw_menu = QMenu("Hotwire", self)
+        hw_menu.setStyleSheet(ms)
+
+        self._act_hw_validate = QAction("Validate Cut Path", self)
+        self._act_hw_kerf     = QAction("Kerf Compensation && Export GCode…", self)
+        self._act_hw_units    = QAction("Drawing Units…", self)
+
+        hw_menu.addAction(self._act_hw_validate)
+        hw_menu.addAction(self._act_hw_kerf)
+        hw_menu.addSeparator()
+        hw_menu.addAction(self._act_hw_units)
+
+        self._btn_hotwire.setMenu(hw_menu)
+
+        # ── View menu ────────────────────────────────────────
+        view_menu = QMenu("View", self)
+        view_menu.setStyleSheet(ms)
+
+        self._act_view_units = QAction("Drawing Units…", self)
+        view_menu.addAction(self._act_view_units)
+
+        self._btn_view.setMenu(view_menu)
+
+        # ── Help menu ────────────────────────────────────────
         help_menu = QMenu("Help", self)
-        help_menu.setStyleSheet(self._menu_style())
+        help_menu.setStyleSheet(ms)
         self._act_about = QAction("About ChandramaCAD", self)
         help_menu.addAction(self._act_about)
         self._btn_help.setMenu(help_menu)
 
-        # Wire file actions
+        # ── Wire all actions ──────────────────────────────────
         self._act_new.triggered.connect(self._on_new)
         self._act_open.triggered.connect(self._on_open)
         self._act_save.triggered.connect(self._on_save)
         self._act_save_as.triggered.connect(self._on_save_as)
+        self._act_import_dxf.triggered.connect(self._on_import_dxf)
+        self._act_import_dat.triggered.connect(self._on_import_dat)
         self._act_export_dxf.triggered.connect(self._on_export_dxf)
         self._act_export_dat.triggered.connect(self._on_export_dat)
+        self._act_export_svg.triggered.connect(self._on_export_svg)
+        self._act_export_pdf.triggered.connect(self._on_export_pdf)
         self._act_insert_image.triggered.connect(self._on_insert_image)
         self._act_exit.triggered.connect(self.close)
+        self._act_hw_validate.triggered.connect(self._on_hw_validate)
+        self._act_hw_kerf.triggered.connect(self._on_hw_kerf)
+        self._act_hw_units.triggered.connect(self._on_drawing_units)
+        self._act_view_units.triggered.connect(self._on_drawing_units)
         self._act_about.triggered.connect(self._on_about)
 
     def _menu_style(self) -> str:
@@ -668,6 +732,236 @@ class MainWindow(QMainWindow):
         self.canvas.update()
         self.properties_panel.show_entities(selected)
         self._update_title()
+
+    # ── Import handlers ───────────────────────────────────────
+
+    def _on_import_dxf(self):
+        if not self._check_save():
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import DXF", "",
+            "DXF Files (*.dxf);;All Files (*)"
+        )
+        if not path:
+            return
+        try:
+            new_doc = import_dxf(path)
+            # Merge into current document or replace
+            reply = QMessageBox.question(
+                self, "Import DXF",
+                "Replace current document with imported DXF?\n\n"
+                "Choose 'Yes' to replace, 'No' to merge into current document.",
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+            )
+            if reply == QMessageBox.Cancel:
+                return
+            if reply == QMessageBox.Yes:
+                self.document = new_doc
+                self.canvas.document = self.document
+                self.layers_panel.document = self.document
+                self._project_path = None
+            else:
+                # Merge: add all layers and entities
+                snap = self.document.begin_operation()
+                existing_layers = {l.name for l in self.document.layers}
+                for layer in new_doc.layers:
+                    if layer.name not in existing_layers:
+                        self.document.layers.append(layer)
+                for entity in new_doc.entities:
+                    self.document.entities.append(entity)
+                self.document.commit_operation(snap)
+
+            self.layers_panel.refresh()
+            self.canvas.fit_to_screen()
+            self.properties_panel.show_entities([])
+            self._update_title()
+            ent_count = len(new_doc.entities)
+            QMessageBox.information(
+                self, "Import Complete",
+                f"Imported {ent_count} entity(ies) from:\n{path}"
+            )
+        except Exception as ex:
+            QMessageBox.critical(self, "Import Error", str(ex))
+
+    def _on_import_dat(self):
+        from PySide6.QtWidgets import QDialog, QFormLayout, QDoubleSpinBox, QPushButton
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import DAT Airfoil", "",
+            "DAT Files (*.dat);;All Files (*)"
+        )
+        if not path:
+            return
+
+        # Ask for chord length
+        dlg = QDialog(self)
+        dlg.setWindowTitle("DAT Import — Chord Length")
+        dlg.setModal(True)
+        dlg.setMinimumWidth(280)
+        dlg.setStyleSheet(
+            "QDialog { background: #F8F9FA; }"
+            "QLabel { color: #1A1A24; font-size: 13px; }"
+            "QDoubleSpinBox { background: #FFFFFF; border: 1px solid #E0E0E0; "
+            "border-radius: 3px; padding: 4px 8px; font-size: 13px; }"
+        )
+        form = QFormLayout(dlg)
+        form.setContentsMargins(16, 16, 16, 16)
+        form.setSpacing(10)
+
+        chord_spin = QDoubleSpinBox()
+        chord_spin.setRange(1.0, 100000.0)
+        chord_spin.setValue(100.0)
+        chord_spin.setDecimals(2)
+        chord_spin.setSuffix(" mm")
+        form.addRow("Chord length:", chord_spin)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        ok_btn = QPushButton("Import")
+        ok_btn.setDefault(True)
+        ok_btn.setStyleSheet(
+            "QPushButton { background: #E55A28; color: #FFFFFF; border: none; "
+            "border-radius: 4px; padding: 6px 18px; font-size: 13px; font-weight: 600; }"
+            "QPushButton:hover { background: #CC4D22; }"
+        )
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setStyleSheet(
+            "QPushButton { background: #FFFFFF; color: #1A1A24; border: 1px solid #E0E0E0; "
+            "border-radius: 4px; padding: 6px 18px; font-size: 13px; }"
+        )
+        ok_btn.clicked.connect(dlg.accept)
+        cancel_btn.clicked.connect(dlg.reject)
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(ok_btn)
+        form.addRow(btn_row)
+
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        chord_mm = chord_spin.value()
+        try:
+            profile_name, polyline = import_dat(path, chord_mm)
+            snap = self.document.begin_operation()
+            polyline.layer = self.document.active_layer
+            self.document.entities.append(polyline)
+            self.document.commit_operation(snap)
+            self.canvas.fit_to_screen()
+            self.layers_panel.refresh()
+            self._update_title()
+            QMessageBox.information(
+                self, "Import Complete",
+                f"Airfoil '{profile_name}' imported at {chord_mm:.1f} mm chord."
+            )
+        except Exception as ex:
+            QMessageBox.critical(self, "Import Error", str(ex))
+
+    # ── Additional export handlers ────────────────────────────
+
+    def _on_export_svg(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export SVG", "", "SVG Files (*.svg);;All Files (*)"
+        )
+        if not path:
+            return
+        if not path.endswith(".svg"):
+            path += ".svg"
+        try:
+            export_svg(self.document, path)
+            QMessageBox.information(self, "Export Complete",
+                                    f"SVG exported to:\n{path}")
+        except Exception as ex:
+            QMessageBox.critical(self, "Export Error", str(ex))
+
+    def _on_export_pdf(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export PDF", "", "PDF Files (*.pdf);;All Files (*)"
+        )
+        if not path:
+            return
+        if not path.endswith(".pdf"):
+            path += ".pdf"
+        try:
+            export_pdf(self.document, path)
+            QMessageBox.information(self, "Export Complete",
+                                    f"PDF exported to:\n{path}")
+        except Exception as ex:
+            QMessageBox.critical(self, "Export Error", str(ex))
+
+    # ── Hotwire handlers ──────────────────────────────────────
+
+    def _on_hw_validate(self):
+        """Validate the selected (or all visible) entities as a cut path."""
+        entities = self.document.selected_entities() or self.document.visible_entities()
+        if not entities:
+            QMessageBox.information(self, "Validate Cut Path",
+                                    "No entities to validate. Draw or select entities first.")
+            return
+        result = validate_cut_path(entities)
+        icon = QMessageBox.Information if result.valid else QMessageBox.Warning
+        msg = "\n".join(result.messages) or "No issues found."
+        QMessageBox.information(self, "Cut Path Validation", msg)
+
+    def _on_hw_kerf(self):
+        """Show kerf/GCode dialog and export GCode."""
+        entities = self.document.selected_entities() or self.document.visible_entities()
+        if not entities:
+            QMessageBox.information(self, "Export GCode",
+                                    "No entities found. Draw or select a cut path first.")
+            return
+
+        # First validate
+        val_result = validate_cut_path(entities)
+        if not val_result.valid:
+            reply = QMessageBox.question(
+                self, "Cut Path Warning",
+                "The cut path has validation issues:\n\n"
+                + "\n".join(val_result.messages)
+                + "\n\nExport GCode anyway?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+        dlg = KerfDialog(self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export GCode", "",
+            "GCode Files (*.nc *.gcode *.txt);;All Files (*)"
+        )
+        if not path:
+            return
+
+        try:
+            result = export_gcode(
+                entities,
+                path,
+                feedrate=dlg.feedrate,
+                rapid_feedrate=dlg.rapid_feedrate,
+                kerf_mm=dlg.kerf_mm,
+                wire_on_cmd=dlg.wire_on_cmd,
+                wire_off_cmd=dlg.wire_off_cmd,
+            )
+            msg = "\n".join(result.messages) or f"GCode exported to:\n{path}"
+            QMessageBox.information(self, "GCode Export", msg)
+        except Exception as ex:
+            QMessageBox.critical(self, "GCode Export Error", str(ex))
+
+    def _on_drawing_units(self):
+        """Show drawing units conversion dialog."""
+        dlg = UnitsDialog(self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        if abs(dlg.scale_factor - 1.0) < 1e-9:
+            return
+        dlg.apply(self.document)
+        self.canvas.fit_to_screen()
+        self._update_title()
+        QMessageBox.information(
+            self, "Units Applied",
+            f"All entities scaled by ×{dlg.scale_factor:.6g}.\n"
+            "Use Ctrl+Z to undo."
+        )
 
     def _on_about(self):
         dlg = AboutDialog(self)

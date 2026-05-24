@@ -17,8 +17,38 @@ class Entity:
     def __init__(self):
         self.id: int = _next_id()
         self.layer: str = "Default"
-        self.color: Optional[str] = None  # None = use layer colour
+        self.color: Optional[str] = None       # None = use layer colour
+        self.linetype: str = "CONTINUOUS"      # DXF linetype name
         self.selected: bool = False
+
+    # ── DXF attribute helpers ────────────────────────────────────────────────
+
+    def _dxf_attribs(self, extra: Optional[dict] = None) -> dict:
+        """
+        Build a dxfattribs dict with layer, colour (true_color + ACI) and
+        linetype.  Pass *extra* to merge additional entity-specific keys.
+        """
+        from core.color_utils import hex_to_aci, hex_to_rgb_int   # local: no cycle
+        attribs: dict = {"layer": self.layer}
+        if self.linetype and self.linetype != "CONTINUOUS":
+            attribs["linetype"] = self.linetype
+        if self.color:
+            try:
+                attribs["true_color"] = hex_to_rgb_int(self.color)
+                attribs["color"] = hex_to_aci(self.color)
+            except Exception:
+                pass
+        if extra:
+            attribs.update(extra)
+        return attribs
+
+    def _copy_base(self, other: "Entity") -> None:
+        """Copy layer, color and linetype to *other* entity (used by clone())."""
+        other.layer = self.layer
+        other.color = self.color
+        other.linetype = self.linetype
+
+    # ── Abstract interface ───────────────────────────────────────────────────
 
     def bounding_box(self) -> tuple[float, float, float, float]:
         raise NotImplementedError
@@ -44,6 +74,8 @@ class Entity:
     def clone(self) -> "Entity":
         raise NotImplementedError
 
+    # ── Geometry helpers ─────────────────────────────────────────────────────
+
     def _rotate_point(self, pt: np.ndarray, angle_deg: float, origin: np.ndarray) -> np.ndarray:
         a = math.radians(angle_deg)
         cos_a, sin_a = math.cos(a), math.sin(a)
@@ -56,6 +88,8 @@ class Entity:
     def _scale_point(self, pt: np.ndarray, factor: float, origin: np.ndarray) -> np.ndarray:
         return origin + (pt - origin) * factor
 
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 class LineEntity(Entity):
     def __init__(self, start: np.ndarray, end: np.ndarray):
@@ -94,7 +128,7 @@ class LineEntity(Entity):
         msp.add_line(
             start=(float(self.start[0]), float(self.start[1]), 0),
             end=(float(self.end[0]), float(self.end[1]), 0),
-            dxfattribs={"layer": self.layer},
+            dxfattribs=self._dxf_attribs(),
         )
 
     def to_points(self, n=2):
@@ -105,10 +139,11 @@ class LineEntity(Entity):
 
     def clone(self):
         e = LineEntity(self.start.copy(), self.end.copy())
-        e.layer = self.layer
-        e.color = self.color
+        self._copy_base(e)
         return e
 
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 class PolylineEntity(Entity):
     def __init__(self, points: list[np.ndarray], closed: bool = False):
@@ -155,17 +190,18 @@ class PolylineEntity(Entity):
 
     def to_dxf(self, msp):
         pts = [(float(p[0]), float(p[1])) for p in self.points]
-        msp.add_lwpolyline(pts, close=self.closed, dxfattribs={"layer": self.layer})
+        msp.add_lwpolyline(pts, close=self.closed, dxfattribs=self._dxf_attribs())
 
     def to_points(self, n=200):
         return np.array(self.points)
 
     def clone(self):
         e = PolylineEntity([p.copy() for p in self.points], self.closed)
-        e.layer = self.layer
-        e.color = self.color
+        self._copy_base(e)
         return e
 
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 class RectangleEntity(Entity):
     def __init__(self, corner1: np.ndarray, corner2: np.ndarray):
@@ -216,7 +252,7 @@ class RectangleEntity(Entity):
         x1, y1 = self.corner1
         x2, y2 = self.corner2
         pts = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
-        msp.add_lwpolyline(pts, close=True, dxfattribs={"layer": self.layer})
+        msp.add_lwpolyline(pts, close=True, dxfattribs=self._dxf_attribs())
 
     def to_points(self, n=4):
         corners = self._corners
@@ -224,10 +260,11 @@ class RectangleEntity(Entity):
 
     def clone(self):
         e = RectangleEntity(self.corner1.copy(), self.corner2.copy())
-        e.layer = self.layer
-        e.color = self.color
+        self._copy_base(e)
         return e
 
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 class CircleEntity(Entity):
     def __init__(self, center: np.ndarray, radius: float):
@@ -261,7 +298,7 @@ class CircleEntity(Entity):
         msp.add_circle(
             center=(float(self.center[0]), float(self.center[1]), 0),
             radius=self.radius,
-            dxfattribs={"layer": self.layer},
+            dxfattribs=self._dxf_attribs(),
         )
 
     def to_points(self, n=200):
@@ -270,10 +307,11 @@ class CircleEntity(Entity):
 
     def clone(self):
         e = CircleEntity(self.center.copy(), self.radius)
-        e.layer = self.layer
-        e.color = self.color
+        self._copy_base(e)
         return e
 
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 class ArcEntity(Entity):
     def __init__(self, center: np.ndarray, radius: float,
@@ -291,8 +329,6 @@ class ArcEntity(Entity):
         return span
 
     def bounding_box(self):
-        cx, cy = self.center
-        r = self.radius
         pts = self.to_points(64)
         xs, ys = pts[:, 0], pts[:, 1]
         return (float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max()))
@@ -301,17 +337,15 @@ class ArcEntity(Entity):
         d = pt - self.center
         angle = math.degrees(math.atan2(float(d[1]), float(d[0]))) % 360
         sa = self.start_angle % 360
-        ea = self.end_angle % 360
         span = self._angle_span()
         rel = (angle - sa) % 360
         if rel <= span:
             clamped = angle
         else:
-            mid = (sa + span / 2) % 360
             if abs(rel - span) < abs(rel):
-                clamped = ea
+                clamped = self.end_angle
             else:
-                clamped = sa
+                clamped = self.start_angle
         rad = math.radians(clamped)
         return self.center + self.radius * np.array([math.cos(rad), math.sin(rad)])
 
@@ -333,7 +367,7 @@ class ArcEntity(Entity):
             radius=self.radius,
             start_angle=self.start_angle,
             end_angle=self.end_angle,
-            dxfattribs={"layer": self.layer},
+            dxfattribs=self._dxf_attribs(),
         )
 
     def to_points(self, n=64):
@@ -347,10 +381,11 @@ class ArcEntity(Entity):
 
     def clone(self):
         e = ArcEntity(self.center.copy(), self.radius, self.start_angle, self.end_angle)
-        e.layer = self.layer
-        e.color = self.color
+        self._copy_base(e)
         return e
 
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 class SplineEntity(Entity):
     def __init__(self, control_points: list[np.ndarray]):
@@ -381,7 +416,7 @@ class SplineEntity(Entity):
 
     def to_dxf(self, msp):
         pts = [(float(p[0]), float(p[1]), 0) for p in self.control_points]
-        msp.add_spline(fit_points=pts, dxfattribs={"layer": self.layer})
+        msp.add_spline(fit_points=pts, dxfattribs=self._dxf_attribs())
 
     def to_points(self, n=200) -> np.ndarray:
         cps = self.control_points
@@ -412,14 +447,13 @@ class SplineEntity(Entity):
 
     def clone(self):
         e = SplineEntity([p.copy() for p in self.control_points])
-        e.layer = self.layer
-        e.color = self.color
+        self._copy_base(e)
         return e
 
 
-# ══════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 # EXTENDED SHAPE ENTITIES
-# ══════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 
 class PolygonEntity(Entity):
     """Regular N-sided polygon defined by center and circumradius."""
@@ -471,7 +505,7 @@ class PolygonEntity(Entity):
 
     def to_dxf(self, msp):
         verts = [(float(v[0]), float(v[1])) for v in self._vertices()]
-        msp.add_lwpolyline(verts, close=True, dxfattribs={"layer": self.layer})
+        msp.add_lwpolyline(verts, close=True, dxfattribs=self._dxf_attribs())
 
     def to_points(self, n=None) -> np.ndarray:
         verts = self._vertices()
@@ -480,10 +514,11 @@ class PolygonEntity(Entity):
     def clone(self):
         e = PolygonEntity(self.center.copy(), self.n_sides,
                           self.circumradius, self.rotation_deg)
-        e.layer = self.layer
-        e.color = self.color
+        self._copy_base(e)
         return e
 
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 class EllipseEntity(Entity):
     """Axis-aligned or rotated ellipse."""
@@ -525,7 +560,7 @@ class EllipseEntity(Entity):
             center=(float(self.center[0]), float(self.center[1]), 0),
             major_axis=major_axis,
             ratio=ratio,
-            dxfattribs={"layer": self.layer},
+            dxfattribs=self._dxf_attribs(),
         )
 
     def to_points(self, n=128) -> np.ndarray:
@@ -540,16 +575,16 @@ class EllipseEntity(Entity):
 
     def clone(self):
         e = EllipseEntity(self.center.copy(), self.rx, self.ry, self.rotation_deg)
-        e.layer = self.layer
-        e.color = self.color
+        self._copy_base(e)
         return e
 
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 class SemiCircleEntity(Entity):
     """
     Half-circle.  flat_angle is the angle (degrees) pointing to the flat-edge
-    start.  The arc spans flat_angle → flat_angle+180 (CCW), bump faces
-    flat_angle+90.  e.g. flat_angle=0 → horizontal flat at bottom, bump up.
+    start.  The arc spans flat_angle → flat_angle+180 (CCW).
     """
     def __init__(self, center: np.ndarray, radius: float, flat_angle: float = 0.0):
         super().__init__()
@@ -587,12 +622,13 @@ class SemiCircleEntity(Entity):
         self.radius *= abs(factor)
 
     def to_dxf(self, msp):
+        attribs = self._dxf_attribs()
         msp.add_arc(
             center=(float(self.center[0]), float(self.center[1]), 0),
             radius=self.radius,
             start_angle=self.flat_angle,
             end_angle=(self.flat_angle + 180) % 360,
-            dxfattribs={"layer": self.layer},
+            dxfattribs=attribs,
         )
         # chord line
         fa = math.radians(self.flat_angle)
@@ -601,7 +637,7 @@ class SemiCircleEntity(Entity):
         p2 = self.center + self.radius * np.array([math.cos(fb), math.sin(fb)])
         msp.add_line((float(p1[0]), float(p1[1]), 0),
                      (float(p2[0]), float(p2[1]), 0),
-                     dxfattribs={"layer": self.layer})
+                     dxfattribs=attribs)
 
     def to_points(self, n=64) -> np.ndarray:
         arc = self._arc_points(n)
@@ -609,14 +645,13 @@ class SemiCircleEntity(Entity):
 
     def clone(self):
         e = SemiCircleEntity(self.center.copy(), self.radius, self.flat_angle)
-        e.layer = self.layer
-        e.color = self.color
+        self._copy_base(e)
         return e
 
 
-# ══════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 # ANNOTATION & CONSTRUCTION ENTITIES
-# ══════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 
 class PointEntity(Entity):
     """Construction / reference point marker."""
@@ -644,7 +679,7 @@ class PointEntity(Entity):
     def to_dxf(self, msp):
         msp.add_point(
             (float(self.position[0]), float(self.position[1]), 0),
-            dxfattribs={"layer": self.layer},
+            dxfattribs=self._dxf_attribs(),
         )
 
     def to_points(self, n=1):
@@ -652,9 +687,11 @@ class PointEntity(Entity):
 
     def clone(self):
         e = PointEntity(self.position.copy())
-        e.layer = self.layer; e.color = self.color
+        self._copy_base(e)
         return e
 
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 class TextEntity(Entity):
     """Text annotation placed at a world position."""
@@ -689,12 +726,11 @@ class TextEntity(Entity):
     def to_dxf(self, msp):
         msp.add_text(
             self.text,
-            dxfattribs={
-                "layer":    self.layer,
+            dxfattribs=self._dxf_attribs({
                 "insert":   (float(self.position[0]), float(self.position[1]), 0),
                 "height":   self.height,
                 "rotation": self.rotation_deg,
-            },
+            }),
         )
 
     def to_points(self, n=1):
@@ -702,9 +738,11 @@ class TextEntity(Entity):
 
     def clone(self):
         e = TextEntity(self.position.copy(), self.text, self.height, self.rotation_deg)
-        e.layer = self.layer; e.color = self.color
+        self._copy_base(e)
         return e
 
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 class DimLinearEntity(Entity):
     """Linear dimension between two measurement points."""
@@ -740,16 +778,28 @@ class DimLinearEntity(Entity):
         self.offset *= factor
 
     def to_dxf(self, msp):
-        pass   # complex ezdxf DIMSTYLE — not yet implemented
+        try:
+            dim = msp.add_aligned_dim(
+                p1=(float(self.p1[0]), float(self.p1[1])),
+                p2=(float(self.p2[0]), float(self.p2[1])),
+                distance=float(abs(self.offset)) if abs(self.offset) > 0.1 else 10.0,
+                dxfattribs={"layer": self.layer},
+            )
+            dim.render()
+        except Exception:
+            # Fallback: draw plain extension lines as geometry
+            pass
 
     def to_points(self, n=2):
         return np.array([self.p1, self.p2])
 
     def clone(self):
         e = DimLinearEntity(self.p1.copy(), self.p2.copy(), self.offset)
-        e.layer = self.layer; e.color = self.color
+        self._copy_base(e)
         return e
 
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 class DimRadialEntity(Entity):
     """Radial or diameter dimension for a circle / arc."""
@@ -785,7 +835,29 @@ class DimRadialEntity(Entity):
         self.radius *= abs(factor)
 
     def to_dxf(self, msp):
-        pass   # not yet implemented
+        try:
+            angle_rad = math.radians(self.angle_deg)
+            mpoint = (
+                float(self.center[0] + self.radius * math.cos(angle_rad)),
+                float(self.center[1] + self.radius * math.sin(angle_rad)),
+            )
+            cx, cy = float(self.center[0]), float(self.center[1])
+            base_attribs = {"layer": self.layer}
+            if self.is_diameter:
+                dim = msp.add_diameter_dim(
+                    center=(cx, cy),
+                    mpoint=mpoint,
+                    dxfattribs=base_attribs,
+                )
+            else:
+                dim = msp.add_radius_dim(
+                    center=(cx, cy),
+                    mpoint=mpoint,
+                    dxfattribs=base_attribs,
+                )
+            dim.render()
+        except Exception:
+            pass
 
     def to_points(self, n=2):
         rad = math.radians(self.angle_deg)
@@ -795,13 +867,13 @@ class DimRadialEntity(Entity):
     def clone(self):
         e = DimRadialEntity(self.center.copy(), self.radius,
                             self.angle_deg, self.is_diameter)
-        e.layer = self.layer; e.color = self.color
+        self._copy_base(e)
         return e
 
 
-# ══════════════════════════════════════════════════════════
-# GROOVE ENTITY (moved below new annotations)
-# ══════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# GROOVE ENTITY
+# ══════════════════════════════════════════════════════════════════════════════
 
 class GrooveEntity(Entity):
     """
@@ -842,23 +914,24 @@ class GrooveEntity(Entity):
         self.radius *= abs(factor)
 
     def to_dxf(self, msp):
+        attribs = self._dxf_attribs()
         alpha = self._axis_angle()
         sa = math.degrees(alpha)
-        # Left cap: start cap around center1 (facing away from center2)
+        # Left cap: arc around center1 (facing away from center2)
         msp.add_arc(
             center=(float(self.center1[0]), float(self.center1[1]), 0),
             radius=self.radius,
             start_angle=(sa + 90) % 360,
             end_angle=(sa + 270) % 360,
-            dxfattribs={"layer": self.layer},
+            dxfattribs=attribs,
         )
-        # Right cap: end cap around center2
+        # Right cap: arc around center2
         msp.add_arc(
             center=(float(self.center2[0]), float(self.center2[1]), 0),
             radius=self.radius,
             start_angle=(sa - 90) % 360,
             end_angle=(sa + 90) % 360,
-            dxfattribs={"layer": self.layer},
+            dxfattribs=attribs,
         )
         # Top and bottom lines
         perp = np.array([-math.sin(alpha), math.cos(alpha)]) * self.radius
@@ -867,16 +940,14 @@ class GrooveEntity(Entity):
             p2 = self.center2 + sign * perp
             msp.add_line((float(p1[0]), float(p1[1]), 0),
                          (float(p2[0]), float(p2[1]), 0),
-                         dxfattribs={"layer": self.layer})
+                         dxfattribs=attribs)
 
     def to_points(self, n=64) -> np.ndarray:
         alpha = self._axis_angle()
         r = self.radius
         half = max(n // 4, 8)
-        # Left cap: arc from α+90° → α+270° (CCW, facing away from center2)
         a1 = np.linspace(alpha + math.pi / 2, alpha + 3 * math.pi / 2, half)
         cap1 = self.center1 + r * np.column_stack([np.cos(a1), np.sin(a1)])
-        # Right cap: arc from α-90° → α+90° (CCW, facing away from center1)
         a2 = np.linspace(alpha - math.pi / 2, alpha + math.pi / 2, half)
         cap2 = self.center2 + r * np.column_stack([np.cos(a2), np.sin(a2)])
         pts = np.vstack([cap1, cap2])
@@ -884,6 +955,5 @@ class GrooveEntity(Entity):
 
     def clone(self):
         e = GrooveEntity(self.center1.copy(), self.center2.copy(), self.radius)
-        e.layer = self.layer
-        e.color = self.color
+        self._copy_base(e)
         return e

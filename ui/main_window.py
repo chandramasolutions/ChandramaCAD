@@ -63,12 +63,13 @@ class MainWindow(QMainWindow):
         top_bar = self._build_top_bar()
         root.addWidget(top_bar)
 
-        # ── Horizontal splitter: toolbar | canvas | right panel ──
+        # ── Horizontal toolbar (full-width, above canvas) ────
+        self.toolbar_panel = ToolbarPanel()
+        root.addWidget(self.toolbar_panel)
+
+        # ── Horizontal splitter: canvas | right panel ────────
         splitter = QSplitter(Qt.Horizontal)
         splitter.setHandleWidth(2)
-
-        self.toolbar_panel = ToolbarPanel()
-        splitter.addWidget(self.toolbar_panel)
 
         self.canvas = Canvas(self.document, self.snap_engine)
         self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -96,9 +97,8 @@ class MainWindow(QMainWindow):
 
         splitter.addWidget(right_panel)
 
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        splitter.setStretchFactor(2, 0)
+        splitter.setStretchFactor(0, 1)   # canvas expands
+        splitter.setStretchFactor(1, 0)   # right panel fixed
 
         root.addWidget(splitter)
 

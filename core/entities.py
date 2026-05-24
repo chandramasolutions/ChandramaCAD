@@ -614,6 +614,195 @@ class SemiCircleEntity(Entity):
         return e
 
 
+# ══════════════════════════════════════════════════════════
+# ANNOTATION & CONSTRUCTION ENTITIES
+# ══════════════════════════════════════════════════════════
+
+class PointEntity(Entity):
+    """Construction / reference point marker."""
+    def __init__(self, position: np.ndarray):
+        super().__init__()
+        self.position = np.array(position, dtype=float)
+
+    def bounding_box(self):
+        x, y = float(self.position[0]), float(self.position[1])
+        return (x, y, x, y)
+
+    def nearest_point(self, pt):
+        return self.position.copy()
+
+    def translate(self, dx, dy):
+        self.position[0] += dx
+        self.position[1] += dy
+
+    def rotate(self, angle_deg, origin):
+        self.position = self._rotate_point(self.position, angle_deg, origin)
+
+    def scale(self, factor, origin):
+        self.position = self._scale_point(self.position, factor, origin)
+
+    def to_dxf(self, msp):
+        msp.add_point(
+            (float(self.position[0]), float(self.position[1]), 0),
+            dxfattribs={"layer": self.layer},
+        )
+
+    def to_points(self, n=1):
+        return np.array([self.position])
+
+    def clone(self):
+        e = PointEntity(self.position.copy())
+        e.layer = self.layer; e.color = self.color
+        return e
+
+
+class TextEntity(Entity):
+    """Text annotation placed at a world position."""
+    def __init__(self, position: np.ndarray, text: str,
+                 height: float = 5.0, rotation_deg: float = 0.0):
+        super().__init__()
+        self.position     = np.array(position, dtype=float)
+        self.text         = str(text)
+        self.height       = float(height)          # mm
+        self.rotation_deg = float(rotation_deg)
+
+    def bounding_box(self):
+        x, y = float(self.position[0]), float(self.position[1])
+        w = self.height * len(self.text) * 0.6
+        return (x, y, x + w, y + self.height)
+
+    def nearest_point(self, pt):
+        return self.position.copy()
+
+    def translate(self, dx, dy):
+        self.position[0] += dx
+        self.position[1] += dy
+
+    def rotate(self, angle_deg, origin):
+        self.position = self._rotate_point(self.position, angle_deg, origin)
+        self.rotation_deg = (self.rotation_deg + angle_deg) % 360
+
+    def scale(self, factor, origin):
+        self.position = self._scale_point(self.position, factor, origin)
+        self.height *= abs(factor)
+
+    def to_dxf(self, msp):
+        msp.add_text(
+            self.text,
+            dxfattribs={
+                "layer":    self.layer,
+                "insert":   (float(self.position[0]), float(self.position[1]), 0),
+                "height":   self.height,
+                "rotation": self.rotation_deg,
+            },
+        )
+
+    def to_points(self, n=1):
+        return np.array([self.position])
+
+    def clone(self):
+        e = TextEntity(self.position.copy(), self.text, self.height, self.rotation_deg)
+        e.layer = self.layer; e.color = self.color
+        return e
+
+
+class DimLinearEntity(Entity):
+    """Linear dimension between two measurement points."""
+    def __init__(self, p1: np.ndarray, p2: np.ndarray, offset: float = 10.0):
+        super().__init__()
+        self.p1     = np.array(p1, dtype=float)
+        self.p2     = np.array(p2, dtype=float)
+        self.offset = float(offset)    # perpendicular offset (mm, signed)
+
+    def measurement(self) -> float:
+        return float(np.linalg.norm(self.p2 - self.p1))
+
+    def bounding_box(self):
+        xs = [self.p1[0], self.p2[0]]
+        ys = [self.p1[1], self.p2[1]]
+        pad = abs(self.offset) + 8
+        return (min(xs) - pad, min(ys) - pad, max(xs) + pad, max(ys) + pad)
+
+    def nearest_point(self, pt):
+        return ((self.p1 + self.p2) / 2).copy()
+
+    def translate(self, dx, dy):
+        self.p1[0] += dx; self.p1[1] += dy
+        self.p2[0] += dx; self.p2[1] += dy
+
+    def rotate(self, angle_deg, origin):
+        self.p1 = self._rotate_point(self.p1, angle_deg, origin)
+        self.p2 = self._rotate_point(self.p2, angle_deg, origin)
+
+    def scale(self, factor, origin):
+        self.p1 = self._scale_point(self.p1, factor, origin)
+        self.p2 = self._scale_point(self.p2, factor, origin)
+        self.offset *= factor
+
+    def to_dxf(self, msp):
+        pass   # complex ezdxf DIMSTYLE — not yet implemented
+
+    def to_points(self, n=2):
+        return np.array([self.p1, self.p2])
+
+    def clone(self):
+        e = DimLinearEntity(self.p1.copy(), self.p2.copy(), self.offset)
+        e.layer = self.layer; e.color = self.color
+        return e
+
+
+class DimRadialEntity(Entity):
+    """Radial or diameter dimension for a circle / arc."""
+    def __init__(self, center: np.ndarray, radius: float,
+                 angle_deg: float = 0.0, is_diameter: bool = False):
+        super().__init__()
+        self.center      = np.array(center, dtype=float)
+        self.radius      = float(radius)
+        self.angle_deg   = float(angle_deg)    # direction of leader line (world)
+        self.is_diameter = bool(is_diameter)
+
+    def bounding_box(self):
+        cx, cy = float(self.center[0]), float(self.center[1])
+        r = self.radius + 20
+        return (cx - r, cy - r, cx + r, cy + r)
+
+    def nearest_point(self, pt):
+        d = pt - self.center
+        dist = float(np.linalg.norm(d))
+        if dist < 1e-12:
+            return self.center + np.array([self.radius, 0])
+        return self.center + d / dist * self.radius
+
+    def translate(self, dx, dy):
+        self.center[0] += dx; self.center[1] += dy
+
+    def rotate(self, angle_deg, origin):
+        self.center = self._rotate_point(self.center, angle_deg, origin)
+        self.angle_deg = (self.angle_deg + angle_deg) % 360
+
+    def scale(self, factor, origin):
+        self.center = self._scale_point(self.center, factor, origin)
+        self.radius *= abs(factor)
+
+    def to_dxf(self, msp):
+        pass   # not yet implemented
+
+    def to_points(self, n=2):
+        rad = math.radians(self.angle_deg)
+        tip = self.center + self.radius * np.array([math.cos(rad), math.sin(rad)])
+        return np.array([self.center, tip])
+
+    def clone(self):
+        e = DimRadialEntity(self.center.copy(), self.radius,
+                            self.angle_deg, self.is_diameter)
+        e.layer = self.layer; e.color = self.color
+        return e
+
+
+# ══════════════════════════════════════════════════════════
+# GROOVE ENTITY (moved below new annotations)
+# ══════════════════════════════════════════════════════════
+
 class GrooveEntity(Entity):
     """
     Slot / oblong groove: two semicircles at each end joined by parallel lines.

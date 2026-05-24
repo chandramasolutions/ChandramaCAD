@@ -10,6 +10,7 @@ from core.entities import (
     Entity, LineEntity, PolylineEntity, RectangleEntity,
     CircleEntity, ArcEntity, SplineEntity,
     PolygonEntity, EllipseEntity, SemiCircleEntity, GrooveEntity,
+    PointEntity, TextEntity, DimLinearEntity, DimRadialEntity,
 )
 
 
@@ -152,6 +153,32 @@ class PropertiesPanel(QWidget):
             self._add_row("Axis length", f"{axis_len:.3f} mm")
             total_len = axis_len + 2 * e.radius
             self._add_row("Total length", f"{total_len:.3f} mm")
+
+        elif isinstance(e, PointEntity):
+            self._add_row("X", f"{e.position[0]:.3f} mm")
+            self._add_row("Y", f"{e.position[1]:.3f} mm")
+
+        elif isinstance(e, TextEntity):
+            self._add_row("X", f"{e.position[0]:.3f} mm")
+            self._add_row("Y", f"{e.position[1]:.3f} mm")
+            self._add_row("Text", e.text)
+            self._add_row("Height", f"{e.height:.3f} mm")
+            self._add_row("Rotation", f"{e.rotation_deg:.2f}°")
+
+        elif isinstance(e, DimLinearEntity):
+            self._add_row("P1 X", f"{e.p1[0]:.3f} mm")
+            self._add_row("P1 Y", f"{e.p1[1]:.3f} mm")
+            self._add_row("P2 X", f"{e.p2[0]:.3f} mm")
+            self._add_row("P2 Y", f"{e.p2[1]:.3f} mm")
+            self._add_row("Measurement", f"{e.measurement():.3f} mm")
+            self._add_row("Offset", f"{e.offset:.3f} mm")
+
+        elif isinstance(e, DimRadialEntity):
+            self._add_row("Center X", f"{e.center[0]:.3f} mm")
+            self._add_row("Center Y", f"{e.center[1]:.3f} mm")
+            self._add_row("Radius", f"{e.radius:.3f} mm")
+            self._add_row("Diameter", f"{e.radius * 2:.3f} mm")
+            self._add_row("Type", "Diameter" if e.is_diameter else "Radius")
 
     def _add_row(self, label: str, value: str):
         lbl = QLabel(label + ":")

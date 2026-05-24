@@ -19,12 +19,18 @@ from ui.canvas import (
     TOOL_SELECT, TOOL_LINE, TOOL_POLYLINE, TOOL_RECTANGLE,
     TOOL_CIRCLE, TOOL_ARC, TOOL_SPLINE,
     TOOL_POLYGON, TOOL_ELLIPSE, TOOL_SEMICIRCLE, TOOL_GROOVE,
+    TOOL_POINT,
+    TOOL_MOVE, TOOL_COPY_TOOL, TOOL_ROTATE, TOOL_MIRROR,
+    TOOL_OFFSET, TOOL_TRIM, TOOL_EXTEND,
+    TOOL_FILLET, TOOL_CHAMFER, TOOL_BREAK,
+    TOOL_TEXT, TOOL_DIM_LINEAR, TOOL_DIM_RADIAL,
 )
 from ui.toolbar_panel import ToolbarPanel
 from ui.layers_panel import LayersPanel
 from ui.properties_panel import PropertiesPanel
 from ui.about_dialog import AboutDialog
 from ui.scale_dialog import ScaleDialog
+from ui.array_dialog import ArrayDialog
 
 
 class MainWindow(QMainWindow):
@@ -252,16 +258,39 @@ class MainWindow(QMainWindow):
         sc("C",        lambda: self._select_tool(TOOL_CIRCLE))
         sc("A",        lambda: self._select_tool(TOOL_ARC))
         sc("E",        lambda: self._select_tool(TOOL_ELLIPSE))
-        sc("Ctrl+Z",   self._on_undo)
-        sc("Ctrl+Y",   self._on_redo)
-        sc("Delete",   self._on_delete_selected)
-        sc("G",        self._toggle_grid)
-        sc("S",        self._toggle_snap)
-        sc("F",        self.canvas.fit_to_screen)
-        sc("+",        self._zoom_in)
-        sc("-",        self._zoom_out)
-        sc("Alt+S",    self._on_scale_selection)
-        sc("Ctrl+I",   self._on_insert_image)
+        sc("Ctrl+Z",    self._on_undo)
+        sc("Ctrl+Y",    self._on_redo)
+        sc("Delete",    self._on_delete_selected)
+        sc("G",         self._toggle_grid)
+        sc("S",         self._toggle_snap)
+        sc("F",         self.canvas.fit_to_screen)
+        sc("+",         self._zoom_in)
+        sc("-",         self._zoom_out)
+        sc("Alt+S",     self._on_scale_selection)
+        sc("Ctrl+I",    self._on_insert_image)
+        # Drawing
+        sc(".",         lambda: self._select_tool(TOOL_POINT))
+        # Modify
+        sc("M",         lambda: self._select_tool(TOOL_MOVE))
+        sc("Ctrl+D",    lambda: self._select_tool(TOOL_COPY_TOOL))
+        sc("Q",         lambda: self._select_tool(TOOL_ROTATE))
+        sc("I",         lambda: self._select_tool(TOOL_MIRROR))
+        sc("O",         lambda: self._select_tool(TOOL_OFFSET))
+        sc("T",         lambda: self._select_tool(TOOL_TRIM))
+        sc("X",         lambda: self._select_tool(TOOL_EXTEND))
+        sc("N",         lambda: self._select_tool(TOOL_FILLET))
+        sc("H",         lambda: self._select_tool(TOOL_CHAMFER))
+        sc("B",         lambda: self._select_tool(TOOL_BREAK))
+        # Array / Hotwire
+        sc("Y",         lambda: self._select_tool("array_rect"))
+        sc("U",         lambda: self._select_tool("array_circ"))
+        sc("J",         lambda: self._select_tool("join"))
+        sc("V",         lambda: self._select_tool("reverse"))
+        sc("K",         lambda: self._select_tool("to_poly"))
+        # Annotation
+        sc("Ctrl+T",    lambda: self._select_tool(TOOL_TEXT))
+        sc("D",         lambda: self._select_tool(TOOL_DIM_LINEAR))
+        sc("Shift+D",   lambda: self._select_tool(TOOL_DIM_RADIAL))
 
     # ── Signal wiring ─────────────────────────────────────
 
@@ -284,6 +313,18 @@ class MainWindow(QMainWindow):
     # ── Actions ───────────────────────────────────────────
 
     def _select_tool(self, tool: str):
+        # Instant operations — don't change the canvas tool mode
+        if tool == "join":
+            self.canvas.op_join(); return
+        elif tool == "reverse":
+            self.canvas.op_reverse(); return
+        elif tool == "to_poly":
+            self.canvas.op_to_polyline(); return
+        elif tool == "array_rect":
+            self._on_array_rect(); return
+        elif tool == "array_circ":
+            self._on_array_circ(); return
+        # Interactive tool selection
         self.canvas.set_tool(tool)
         self.toolbar_panel.set_active_tool(tool)
         tool_name = tool.replace("_", " ").title()
@@ -466,6 +507,37 @@ class MainWindow(QMainWindow):
                                     f"DAT exported to:\n{path}")
         except Exception as ex:
             QMessageBox.critical(self, "Export Error", str(ex))
+
+    def _on_array_rect(self):
+        if not self.document.selected_entities():
+            QMessageBox.information(self, "Array", "Select entities first, then run Array.")
+            return
+        dlg = ArrayDialog(self)
+        dlg._tabs.setCurrentIndex(0)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        self.canvas.op_array_rect(
+            dlg.rows, dlg.cols,
+            dlg.row_spacing, dlg.col_spacing,
+            dlg.array_angle,
+        )
+        self.layers_panel.refresh()
+        self._update_title()
+
+    def _on_array_circ(self):
+        if not self.document.selected_entities():
+            QMessageBox.information(self, "Array", "Select entities first, then run Array.")
+            return
+        dlg = ArrayDialog(self)
+        dlg._tabs.setCurrentIndex(1)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        center = np.array([dlg.center_x, dlg.center_y])
+        self.canvas.op_array_circ(
+            dlg.count, center, dlg.fill_angle, dlg.rotate_items
+        )
+        self.layers_panel.refresh()
+        self._update_title()
 
     def _on_insert_image(self):
         path, _ = QFileDialog.getOpenFileName(

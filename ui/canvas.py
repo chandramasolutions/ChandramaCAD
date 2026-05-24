@@ -1,8 +1,9 @@
 from __future__ import annotations
 import math
+import copy
 import numpy as np
 from typing import Optional
-from PySide6.QtWidgets import QWidget, QApplication
+from PySide6.QtWidgets import QWidget, QApplication, QInputDialog
 from PySide6.QtCore import Qt, QPoint, QRect, QRectF, Signal, QPointF
 from PySide6.QtGui import (
     QPainter, QPen, QBrush, QColor, QFont, QPixmap,
@@ -13,8 +14,15 @@ from core.entities import (
     Entity, LineEntity, PolylineEntity, RectangleEntity,
     CircleEntity, ArcEntity, SplineEntity,
     PolygonEntity, EllipseEntity, SemiCircleEntity, GrooveEntity,
+    PointEntity, TextEntity, DimLinearEntity, DimRadialEntity,
 )
 from core.snap_engine import SnapEngine, SnapResult
+from core.intersect import (
+    mirror_point, offset_polyline, offset_segment,
+    line_line_intersect, seg_seg_intersect,
+    circle_line_t, t_values_on_line,
+    fillet_lines, chamfer_lines,
+)
 
 
 # ── Tool mode constants ───────────────────────────────────────
@@ -29,11 +37,30 @@ TOOL_POLYGON    = "polygon"
 TOOL_ELLIPSE    = "ellipse"
 TOOL_SEMICIRCLE = "semicircle"
 TOOL_GROOVE     = "groove"
+TOOL_POINT      = "point"
+
+# Modify tools
+TOOL_MOVE       = "move"
+TOOL_COPY_TOOL  = "copy_tool"
+TOOL_ROTATE     = "rotate"
+TOOL_MIRROR     = "mirror"
+TOOL_OFFSET     = "offset"
+TOOL_TRIM       = "trim"
+TOOL_EXTEND     = "extend"
+TOOL_FILLET     = "fillet"
+TOOL_CHAMFER    = "chamfer"
+TOOL_BREAK      = "break_pt"
+
+# Annotation tools
+TOOL_TEXT       = "text"
+TOOL_DIM_LINEAR = "dim_linear"
+TOOL_DIM_RADIAL = "dim_radial"
 
 # Axis colours
 _X_COLOR      = QColor("#C04444")
 _Y_COLOR      = QColor("#2266BB")
 _ORIGIN_COLOR = QColor("#555555")
+_DIM_COLOR    = QColor("#6644AA")
 
 
 # ── Image overlay ─────────────────────────────────────────────
@@ -45,10 +72,10 @@ class ImageOverlay:
                  opacity: float = 0.5):
         self.pixmap   = pixmap
         self.path     = path
-        self.world_x  = float(world_x)   # top-left X (mm)
-        self.world_y  = float(world_y)   # top-left Y (mm, +Y up)
-        self.world_w  = float(world_w)   # width  (mm, positive)
-        self.world_h  = float(world_h)   # height (mm, positive)
+        self.world_x  = float(world_x)
+        self.world_y  = float(world_y)
+        self.world_w  = float(world_w)
+        self.world_h  = float(world_h)
         self.opacity  = max(0.05, min(1.0, float(opacity)))
         self.visible  = True
         self.locked   = False
@@ -69,46 +96,57 @@ class Canvas(QWidget):
         self.snap_engine = snap_engine
 
         # View
-        self._scale: float = 5.0          # pixels per mm
+        self._scale: float = 5.0
         self._pan_offset   = QPointF(0.0, 0.0)
-        self._initialized  = False        # set origin to center on first show
+        self._initialized  = False
 
         # Grid / axes
         self.grid_visible: bool = True
         self.axes_visible: bool = True
-        self.grid_size: float   = 10.0    # mm
+        self.grid_size: float   = 10.0
 
         # Images
-        self._images: list[ImageOverlay]   = []
+        self._images: list[ImageOverlay]        = []
         self._dragging_image: Optional[ImageOverlay] = None
-        self._drag_img_offset: np.ndarray  = np.zeros(2)
+        self._drag_img_offset: np.ndarray       = np.zeros(2)
 
-        # Tool state
+        # Tool state — drawing
         self._tool: str              = TOOL_SELECT
         self._tool_points: list[np.ndarray] = []
         self._polygon_sides: int     = 6
 
-        # Arc state (3-click)
+        # Arc (3-click)
         self._arc_step: int          = 0
         self._arc_center: Optional[np.ndarray] = None
         self._arc_radius: float      = 0.0
         self._arc_start_angle: float = 0.0
 
-        # Groove state (3-click)
+        # Groove (3-click)
         self._groove_step: int = 0
         self._groove_c1: Optional[np.ndarray] = None
         self._groove_c2: Optional[np.ndarray] = None
+
+        # Tool state — modify
+        self._mod_step: int = 0
+        self._mod_base:  Optional[np.ndarray] = None   # Move/Copy base point
+        self._mod_ref_angle: float = 0.0               # Rotate reference angle
+        self._mod_entity: Optional[Entity] = None      # Offset / Trim / Extend / Fillet / Chamfer hit
+
+        # Dimension tool
+        self._dim_step: int = 0
+        self._dim_p1:   Optional[np.ndarray] = None
+        self._dim_p2:   Optional[np.ndarray] = None
 
         # Snap / cursor
         self._snap_result: Optional[SnapResult] = None
         self._cursor_world = np.zeros(2)
 
         # Pan
-        self._panning           = False
-        self._pan_start_px: Optional[QPoint]  = None
+        self._panning = False
+        self._pan_start_px: Optional[QPoint]   = None
         self._pan_start_offset: Optional[QPointF] = None
 
-        # Rubber-band select
+        # Rubber-band
         self._rubber_start_px: Optional[QPoint] = None
         self._rubber_end_px:   Optional[QPoint] = None
 
@@ -121,7 +159,6 @@ class Canvas(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         if not self._initialized:
-            # Place origin at the centre of the canvas on first show
             self._pan_offset  = QPointF(self.width() / 2.0, self.height() / 2.0)
             self._initialized = True
 
@@ -137,14 +174,7 @@ class Canvas(QWidget):
     def set_polygon_sides(self, n: int):
         self._polygon_sides = max(3, n)
 
-    def set_grid_visible(self, v: bool):
-        self.grid_visible = v; self.update()
-
-    def set_axes_visible(self, v: bool):
-        self.axes_visible = v; self.update()
-
     def center_origin(self):
-        """Reset view so world (0,0) is at the screen centre."""
         self._pan_offset = QPointF(self.width() / 2.0, self.height() / 2.0)
         self._scale      = 5.0
         self.zoom_changed.emit(self._scale)
@@ -194,6 +224,179 @@ class Canvas(QWidget):
     def selected_images(self) -> list[ImageOverlay]:
         return [img for img in self._images if img.selected]
 
+    # ── Instant operations (called from main_window) ──────────
+
+    def op_join(self, tolerance: float = 0.5):
+        """Merge endpoint-connected selected entities into polylines."""
+        selected = self.document.selected_entities()
+        if len(selected) < 2:
+            return
+
+        # Collect all segments as (start, end, entity)
+        def endpoints(e: Entity):
+            if isinstance(e, LineEntity):
+                return e.start.copy(), e.end.copy()
+            elif isinstance(e, PolylineEntity):
+                return e.points[0].copy(), e.points[-1].copy()
+            elif isinstance(e, SplineEntity) and e.control_points:
+                return e.control_points[0].copy(), e.control_points[-1].copy()
+            return None, None
+
+        # Build adjacency
+        remaining = list(selected)
+        chains: list[list[np.ndarray]] = []
+
+        while remaining:
+            # Start a new chain with first remaining
+            seed = remaining.pop(0)
+            s, e_pt = endpoints(seed)
+            if s is None:
+                continue
+            chain_pts = list(seed.to_points(64))
+            chain_closed = False
+
+            changed = True
+            while changed:
+                changed = False
+                for ent in list(remaining):
+                    ep_s, ep_e = endpoints(ent)
+                    if ep_s is None:
+                        continue
+                    cur_s = np.array(chain_pts[0])
+                    cur_e = np.array(chain_pts[-1])
+                    ent_pts = list(ent.to_points(64))
+                    if np.linalg.norm(cur_e - ep_s) < tolerance:
+                        chain_pts = chain_pts + ent_pts[1:]
+                        remaining.remove(ent); changed = True
+                    elif np.linalg.norm(cur_e - ep_e) < tolerance:
+                        chain_pts = chain_pts + list(reversed(ent_pts))[1:]
+                        remaining.remove(ent); changed = True
+                    elif np.linalg.norm(cur_s - ep_e) < tolerance:
+                        chain_pts = ent_pts + chain_pts[1:]
+                        remaining.remove(ent); changed = True
+                    elif np.linalg.norm(cur_s - ep_s) < tolerance:
+                        chain_pts = list(reversed(ent_pts)) + chain_pts[1:]
+                        remaining.remove(ent); changed = True
+
+            chains.append(chain_pts)
+
+        if not chains:
+            return
+
+        snap = self.document.begin_operation()
+        ids = [e.id for e in selected]
+        self.document.entities = [e for e in self.document.entities if e.id not in ids]
+        for chain_pts in chains:
+            pts = [np.array(p) for p in chain_pts]
+            if len(pts) >= 2:
+                poly = PolylineEntity(pts)
+                poly.layer = self.document.active_layer
+                self.document.entities.append(poly)
+        self.document.commit_operation(snap)
+        self.document.deselect_all()
+        self.selection_changed.emit([])
+        self.entity_added.emit(None)
+        self.update()
+
+    def op_reverse(self):
+        """Reverse direction of selected polylines / splines / lines."""
+        selected = self.document.selected_entities()
+        if not selected:
+            return
+        snap = self.document.begin_operation()
+        for e in selected:
+            if isinstance(e, PolylineEntity):
+                e.points = list(reversed(e.points))
+            elif isinstance(e, SplineEntity):
+                e.control_points = list(reversed(e.control_points))
+            elif isinstance(e, LineEntity):
+                e.start, e.end = e.end.copy(), e.start.copy()
+        self.document.commit_operation(snap)
+        self.update()
+
+    def op_to_polyline(self, segments: int = 200):
+        """Convert selected entities to polylines (discretise curves)."""
+        selected = self.document.selected_entities()
+        if not selected:
+            return
+        snap = self.document.begin_operation()
+        ids = [e.id for e in selected]
+        new_entities = []
+        for e in selected:
+            pts = e.to_points(segments)
+            if len(pts) >= 2:
+                poly = PolylineEntity([np.array(p) for p in pts])
+                poly.layer = e.layer
+                poly.color = e.color
+                new_entities.append(poly)
+        self.document.entities = [e for e in self.document.entities if e.id not in ids]
+        for ne in new_entities:
+            self.document.entities.append(ne)
+        self.document.commit_operation(snap)
+        self.document.deselect_all()
+        self.selection_changed.emit([])
+        self.entity_added.emit(None)
+        self.update()
+
+    def op_array_rect(self, rows: int, cols: int,
+                      row_spacing: float, col_spacing: float,
+                      angle_deg: float = 0.0):
+        """Rectangular array of selected entities."""
+        selected = self.document.selected_entities()
+        if not selected:
+            return
+        snap = self.document.begin_operation()
+        ang = math.radians(angle_deg)
+        cos_a, sin_a = math.cos(ang), math.sin(ang)
+        for r in range(rows):
+            for c in range(cols):
+                if r == 0 and c == 0:
+                    continue
+                dx_w = c * col_spacing
+                dy_w = r * row_spacing
+                # Rotate offset by array angle
+                dx = dx_w * cos_a - dy_w * sin_a
+                dy = dx_w * sin_a + dy_w * cos_a
+                for e in selected:
+                    clone = e.clone()
+                    clone.translate(float(dx), float(dy))
+                    clone.selected = False
+                    self.document.entities.append(clone)
+        self.document.commit_operation(snap)
+        self.entity_added.emit(None)
+        self.update()
+
+    def op_array_circ(self, count: int, center: np.ndarray,
+                      fill_angle: float = 360.0, rotate_items: bool = True):
+        """Circular array of selected entities."""
+        selected = self.document.selected_entities()
+        if not selected or count < 2:
+            return
+        snap = self.document.begin_operation()
+        step = fill_angle / (count if abs(fill_angle - 360) < 0.01 else count - 1)
+        for i in range(1, count):
+            angle = step * i
+            for e in selected:
+                clone = e.clone()
+                clone.rotate(angle, center)
+                if not rotate_items:
+                    # Undo the rotation of the entity itself, keep only position change
+                    clone.rotate(-angle, center)
+                    bb = e.bounding_box()
+                    cx_e = (bb[0] + bb[2]) / 2
+                    cy_e = (bb[1] + bb[3]) / 2
+                    rad_e = math.radians(angle)
+                    new_cx = center[0] + (cx_e - center[0]) * math.cos(rad_e) \
+                                       - (cy_e - center[1]) * math.sin(rad_e)
+                    new_cy = center[1] + (cx_e - center[0]) * math.sin(rad_e) \
+                                       + (cy_e - center[1]) * math.cos(rad_e)
+                    clone.translate(float(new_cx - cx_e), float(new_cy - cy_e))
+                clone.selected = False
+                self.document.entities.append(clone)
+        self.document.commit_operation(snap)
+        self.entity_added.emit(None)
+        self.update()
+
     # ── Coordinate transforms ─────────────────────────────────
 
     def world_to_screen(self, wx: float, wy: float) -> QPointF:
@@ -214,36 +417,27 @@ class Canvas(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        # 0. White background
         painter.fillRect(self.rect(), QColor("#FFFFFF"))
 
-        # 1. Grid
         if self.grid_visible:
             self._draw_grid(painter)
 
-        # 2. Reference images (semi-transparent, under entities)
         self._draw_images(painter)
 
-        # 3. Origin axes (over images, under entities)
         if self.axes_visible:
             self._draw_origin_axes(painter)
 
-        # 4. Geometry entities
         for entity in self.document.visible_entities():
             self._draw_entity(painter, entity)
 
-        # 5. Selection handles
         for entity in self.document.selected_entities():
             self._draw_selection_handles(painter, entity)
 
-        # 6. Active-tool rubber-band preview
         self._draw_tool_preview(painter)
 
-        # 7. Snap indicator
         if self._snap_result and self._snap_result.snap_type != "none":
             self._draw_snap_indicator(painter, self._snap_result.point)
 
-        # 8. Rubber-band selection rect
         if self._rubber_start_px and self._rubber_end_px:
             self._draw_rubber_band(painter)
 
@@ -292,7 +486,6 @@ class Canvas(QWidget):
             painter.drawPixmap(target, img.pixmap)
             painter.setOpacity(1.0)
 
-            # Selection border + corner handles
             if img.selected:
                 frect = QRectF(tl, br)
                 sel_pen = QPen(QColor("#E55A28"), 1.8, Qt.DashLine)
@@ -300,17 +493,14 @@ class Canvas(QWidget):
                 painter.setPen(sel_pen)
                 painter.setBrush(Qt.NoBrush)
                 painter.drawRect(frect)
-                # Corner handles
                 painter.setPen(Qt.NoPen)
                 painter.setBrush(QColor("#E55A28"))
                 for corner in (frect.topLeft(), frect.topRight(),
                                frect.bottomLeft(), frect.bottomRight()):
                     painter.drawRect(QRectF(corner.x() - 5, corner.y() - 5, 10, 10))
-                # Path label (file name)
                 import os as _os
                 painter.setPen(QColor("#E55A28"))
-                lbl_font = QFont("Segoe UI", 8)
-                painter.setFont(lbl_font)
+                painter.setFont(QFont("Segoe UI", 8))
                 painter.drawText(QPointF(tl.x() + 4, tl.y() + 14),
                                  _os.path.basename(img.path))
 
@@ -324,55 +514,36 @@ class Canvas(QWidget):
         origin_s = self.world_to_screen(0.0, 0.0)
         ox, oy   = origin_s.x(), origin_s.y()
 
-        # ── X-axis ────────────────────────────────────────────
         if 0 <= oy <= sh:
-            pen = QPen(_X_COLOR, 1.5)
-            pen.setCosmetic(True)
-            painter.setPen(pen)
-            painter.setBrush(Qt.NoBrush)
+            pen = QPen(_X_COLOR, 1.5); pen.setCosmetic(True)
+            painter.setPen(pen); painter.setBrush(Qt.NoBrush)
             painter.drawLine(QPointF(0.0, oy), QPointF(sw, oy))
-
-            # Arrow at right edge → +X
             tip = QPointF(sw - 2, oy)
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(_X_COLOR)
+            painter.setPen(Qt.NoPen); painter.setBrush(_X_COLOR)
             painter.drawPolygon(QPolygonF([
                 tip,
                 QPointF(sw - 2 - ARROW, oy - ARROW * 0.4),
                 QPointF(sw - 2 - ARROW, oy + ARROW * 0.4),
             ]))
-            painter.setFont(font)
-            painter.setPen(_X_COLOR)
+            painter.setFont(font); painter.setPen(_X_COLOR)
             painter.drawText(QPointF(sw - 2 - ARROW - 26, oy - 5), "+X")
-
-            # Tick labels
             self._draw_x_ticks(painter, oy, sw, sh)
 
-        # ── Y-axis ────────────────────────────────────────────
         if 0 <= ox <= sw:
-            pen = QPen(_Y_COLOR, 1.5)
-            pen.setCosmetic(True)
-            painter.setPen(pen)
-            painter.setBrush(Qt.NoBrush)
+            pen = QPen(_Y_COLOR, 1.5); pen.setCosmetic(True)
+            painter.setPen(pen); painter.setBrush(Qt.NoBrush)
             painter.drawLine(QPointF(ox, 0.0), QPointF(ox, sh))
-
-            # Arrow at top edge ↑ +Y
             tip = QPointF(ox, 2.0)
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(_Y_COLOR)
+            painter.setPen(Qt.NoPen); painter.setBrush(_Y_COLOR)
             painter.drawPolygon(QPolygonF([
                 tip,
                 QPointF(ox - ARROW * 0.4, 2.0 + ARROW),
                 QPointF(ox + ARROW * 0.4, 2.0 + ARROW),
             ]))
-            painter.setFont(font)
-            painter.setPen(_Y_COLOR)
+            painter.setFont(font); painter.setPen(_Y_COLOR)
             painter.drawText(QPointF(ox + 5, 2.0 + ARROW + 14), "+Y")
-
-            # Tick labels
             self._draw_y_ticks(painter, ox, sw, sh)
 
-        # ── Origin dot ────────────────────────────────────────
         if 0 <= ox <= sw and 0 <= oy <= sh:
             painter.setPen(QPen(_ORIGIN_COLOR, 1.2))
             painter.setBrush(QColor("#FFFFFF"))
@@ -398,8 +569,7 @@ class Canvas(QWidget):
         left_w  = self.screen_to_world(0, 0)[0]
         right_w = self.screen_to_world(sw, 0)[0]
         tick    = self._nice_interval(right_w - left_w)
-        font    = QFont("Segoe UI", 7)
-        painter.setFont(font)
+        painter.setFont(QFont("Segoe UI", 7))
         x = math.floor(left_w / tick) * tick
         while x <= right_w:
             if abs(x) > tick * 0.01:
@@ -415,8 +585,7 @@ class Canvas(QWidget):
         bot_w = self.screen_to_world(0, sh)[1]
         top_w = self.screen_to_world(0, 0)[1]
         tick  = self._nice_interval(top_w - bot_w)
-        font  = QFont("Segoe UI", 7)
-        painter.setFont(font)
+        painter.setFont(QFont("Segoe UI", 7))
         y = math.floor(bot_w / tick) * tick
         while y <= top_w:
             if abs(y) > tick * 0.01:
@@ -434,12 +603,38 @@ class Canvas(QWidget):
         layer     = self.document.get_layer(entity.layer)
         color_str = entity.color or (layer.color if layer else "#1A1A24")
         color     = QColor(color_str)
-        pen       = QPen(color, 2.0 if entity.selected else 1.2)
+
+        if isinstance(entity, DimLinearEntity):
+            self._draw_dim_linear(painter, entity)
+            return
+        if isinstance(entity, DimRadialEntity):
+            self._draw_dim_radial(painter, entity)
+            return
+
+        pen = QPen(color, 2.0 if entity.selected else 1.2)
         pen.setCosmetic(True)
         painter.setPen(pen)
         painter.setBrush(Qt.NoBrush)
 
-        if isinstance(entity, LineEntity):
+        if isinstance(entity, PointEntity):
+            sp = self.world_to_screen(float(entity.position[0]), float(entity.position[1]))
+            sz = 5.0
+            painter.drawLine(QPointF(sp.x() - sz, sp.y()), QPointF(sp.x() + sz, sp.y()))
+            painter.drawLine(QPointF(sp.x(), sp.y() - sz), QPointF(sp.x(), sp.y() + sz))
+            painter.drawEllipse(sp, 2.5, 2.5)
+
+        elif isinstance(entity, TextEntity):
+            sp  = self.world_to_screen(float(entity.position[0]), float(entity.position[1]))
+            h_px = max(6.0, entity.height * self._scale)
+            font = QFont("Segoe UI", int(h_px))
+            painter.setFont(font)
+            painter.save()
+            painter.translate(sp)
+            painter.rotate(-entity.rotation_deg)
+            painter.drawText(QPointF(0, 0), entity.text)
+            painter.restore()
+
+        elif isinstance(entity, LineEntity):
             painter.drawLine(self.world_to_screen(*entity.start),
                              self.world_to_screen(*entity.end))
 
@@ -449,9 +644,9 @@ class Canvas(QWidget):
                                     entity.radius * self._scale)
 
         elif isinstance(entity, EllipseEntity):
-            c    = self.world_to_screen(*entity.center)
-            rx   = entity.rx * self._scale
-            ry   = entity.ry * self._scale
+            c  = self.world_to_screen(*entity.center)
+            rx = entity.rx * self._scale
+            ry = entity.ry * self._scale
             if abs(entity.rotation_deg) > 0.01:
                 painter.save()
                 painter.translate(c)
@@ -466,8 +661,7 @@ class Canvas(QWidget):
             if len(pts) < 2: return
             path = QPainterPath()
             path.moveTo(self.world_to_screen(pts[0][0], pts[0][1]))
-            for p in pts[1:]:
-                path.lineTo(self.world_to_screen(p[0], p[1]))
+            for p in pts[1:]: path.lineTo(self.world_to_screen(p[0], p[1]))
             painter.drawPath(path)
 
         elif isinstance(entity, (PolylineEntity, RectangleEntity, SplineEntity,
@@ -476,19 +670,116 @@ class Canvas(QWidget):
             if len(pts) < 2: return
             path = QPainterPath()
             path.moveTo(self.world_to_screen(pts[0][0], pts[0][1]))
-            for p in pts[1:]:
-                path.lineTo(self.world_to_screen(p[0], p[1]))
+            for p in pts[1:]: path.lineTo(self.world_to_screen(p[0], p[1]))
             closed = isinstance(entity, (RectangleEntity, PolygonEntity, GrooveEntity)) or \
                      (isinstance(entity, PolylineEntity) and entity.closed)
             if closed:
                 path.closeSubpath()
             painter.drawPath(path)
 
+    def _draw_dim_linear(self, painter: QPainter, entity: DimLinearEntity):
+        """Draw a linear dimension with extension lines, arrows and text."""
+        p1, p2 = entity.p1, entity.p2
+        d = p2 - p1
+        length = float(np.linalg.norm(d))
+        if length < 1e-10:
+            return
+
+        perp = np.array([-d[1], d[0]]) / length  # unit perpendicular (left)
+        off = entity.offset
+
+        # Offset points in world space
+        op1 = p1 + perp * off
+        op2 = p2 + perp * off
+
+        op1s = self.world_to_screen(float(op1[0]), float(op1[1]))
+        op2s = self.world_to_screen(float(op2[0]), float(op2[1]))
+        p1s  = self.world_to_screen(float(p1[0]), float(p1[1]))
+        p2s  = self.world_to_screen(float(p2[0]), float(p2[1]))
+
+        color = QColor(_DIM_COLOR) if not entity.color else QColor(entity.color)
+        ext_pen = QPen(color, 0.8, Qt.DotLine); ext_pen.setCosmetic(True)
+        dim_pen = QPen(color, 1.4); dim_pen.setCosmetic(True)
+
+        # Extension lines
+        painter.setPen(ext_pen)
+        painter.drawLine(p1s, op1s)
+        painter.drawLine(p2s, op2s)
+
+        # Dimension line
+        painter.setPen(dim_pen)
+        painter.drawLine(op1s, op2s)
+
+        # Arrows
+        ARROW = 7.0
+        dl = math.hypot(op2s.x() - op1s.x(), op2s.y() - op1s.y())
+        if dl > 1e-6:
+            ux = (op2s.x() - op1s.x()) / dl
+            uy = (op2s.y() - op1s.y()) / dl
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(color)
+            for tip, sgn in [(op1s, 1.0), (op2s, -1.0)]:
+                painter.drawPolygon(QPolygonF([
+                    tip,
+                    QPointF(tip.x() + sgn * ux * ARROW - uy * ARROW * 0.35,
+                            tip.y() + sgn * uy * ARROW + ux * ARROW * 0.35),
+                    QPointF(tip.x() + sgn * ux * ARROW + uy * ARROW * 0.35,
+                            tip.y() + sgn * uy * ARROW - ux * ARROW * 0.35),
+                ]))
+
+        # Measurement text
+        mid = QPointF((op1s.x() + op2s.x()) / 2, (op1s.y() + op2s.y()) / 2)
+        text = f"{entity.measurement():.2f}"
+        painter.setPen(color)
+        painter.setFont(QFont("Segoe UI", 8))
+        angle_deg = math.degrees(math.atan2(op2s.y() - op1s.y(), op2s.x() - op1s.x()))
+        painter.save()
+        painter.translate(mid)
+        painter.rotate(angle_deg)
+        fm = painter.fontMetrics()
+        tw = fm.horizontalAdvance(text)
+        painter.drawText(QPointF(-tw / 2, -4), text)
+        painter.restore()
+
+    def _draw_dim_radial(self, painter: QPainter, entity: DimRadialEntity):
+        """Draw a radial/diameter dimension leader."""
+        cs  = self.world_to_screen(float(entity.center[0]), float(entity.center[1]))
+        rad = math.radians(entity.angle_deg)
+        r_px = entity.radius * self._scale
+
+        tip_x = cs.x() + math.cos(rad) * r_px
+        tip_y = cs.y() - math.sin(rad) * r_px   # screen Y is flipped
+        tip   = QPointF(tip_x, tip_y)
+
+        ext   = 18.0   # leader extension (px)
+        text_pt = QPointF(tip_x + math.cos(rad) * ext,
+                          tip_y - math.sin(rad) * ext)
+
+        color = QColor(_DIM_COLOR) if not entity.color else QColor(entity.color)
+        pen   = QPen(color, 1.4); pen.setCosmetic(True)
+        painter.setPen(pen); painter.setBrush(Qt.NoBrush)
+
+        # If diameter: draw through center
+        if entity.is_diameter:
+            opp = QPointF(cs.x() - math.cos(rad) * r_px,
+                          cs.y() + math.sin(rad) * r_px)
+            painter.drawLine(opp, tip)
+        else:
+            painter.drawLine(cs, tip)
+
+        painter.drawLine(tip, text_pt)
+
+        prefix = "⌀" if entity.is_diameter else "R"
+        val    = entity.radius * 2 if entity.is_diameter else entity.radius
+        text   = f"{prefix}{val:.2f}"
+        painter.setPen(color)
+        painter.setFont(QFont("Segoe UI", 8))
+        painter.drawText(QPointF(text_pt.x() + 2, text_pt.y() + 4), text)
+
     # ── Selection handles ─────────────────────────────────────
 
     def _draw_selection_handles(self, painter: QPainter, entity: Entity):
-        pen = QPen(QColor("#E55A28"), 1.5)
-        pen.setCosmetic(True)
+        pen = QPen(QColor("#E55A28"), 1.5); pen.setCosmetic(True)
         painter.setPen(pen)
         painter.setBrush(QColor("#E55A28"))
         sz = 7
@@ -497,7 +788,13 @@ class Canvas(QWidget):
             sp = self.world_to_screen(float(world_pt[0]), float(world_pt[1]))
             painter.drawRect(int(sp.x()) - sz // 2, int(sp.y()) - sz // 2, sz, sz)
 
-        if isinstance(entity, LineEntity):
+        if isinstance(entity, PointEntity):
+            handle(entity.position)
+        elif isinstance(entity, (TextEntity, DimLinearEntity)):
+            pass
+        elif isinstance(entity, DimRadialEntity):
+            handle(entity.center)
+        elif isinstance(entity, LineEntity):
             handle(entity.start); handle(entity.end)
         elif isinstance(entity, PolylineEntity):
             for p in entity.points: handle(p)
@@ -527,13 +824,14 @@ class Canvas(QWidget):
     # ── Tool preview ──────────────────────────────────────────
 
     def _draw_tool_preview(self, painter: QPainter):
-        pen = QPen(QColor("#E55A28"), 1.5, Qt.DashLine)
-        pen.setCosmetic(True)
-        painter.setPen(pen)
+        dash_pen = QPen(QColor("#E55A28"), 1.5, Qt.DashLine)
+        dash_pen.setCosmetic(True)
+        painter.setPen(dash_pen)
         painter.setBrush(Qt.NoBrush)
         cur = self._snap_result.point if self._snap_result else self._cursor_world
         t   = self._tool
 
+        # ── Drawing tools ─────────────────────────────────
         if t == TOOL_LINE and self._tool_points:
             painter.drawLine(self.world_to_screen(*self._tool_points[0]),
                              self.world_to_screen(*cur))
@@ -558,8 +856,8 @@ class Canvas(QWidget):
         elif t == TOOL_CIRCLE and self._tool_points:
             c  = self.world_to_screen(*self._tool_points[0])
             c2 = self.world_to_screen(*cur)
-            painter.drawEllipse(c, math.hypot(c2.x()-c.x(), c2.y()-c.y()),
-                                   math.hypot(c2.x()-c.x(), c2.y()-c.y()))
+            r  = math.hypot(c2.x() - c.x(), c2.y() - c.y())
+            painter.drawEllipse(c, r, r)
 
         elif t == TOOL_ARC:
             if self._arc_step == 1 and self._arc_center is not None:
@@ -570,21 +868,13 @@ class Canvas(QWidget):
                                              float(cur[0] - self._arc_center[0]))) % 360
                 dummy = ArcEntity(self._arc_center, self._arc_radius,
                                   self._arc_start_angle, ea)
-                pts = dummy.to_points(32)
-                if len(pts) > 1:
-                    path = QPainterPath()
-                    path.moveTo(self.world_to_screen(pts[0][0], pts[0][1]))
-                    for p in pts[1:]: path.lineTo(self.world_to_screen(p[0], p[1]))
-                    painter.drawPath(path)
+                self._draw_pts_path(painter, dummy.to_points(32))
 
         elif t == TOOL_SPLINE and self._tool_points:
             dummy = SplineEntity(self._tool_points + [cur])
             pts   = dummy.to_points()
             if len(pts) > 1:
-                path = QPainterPath()
-                path.moveTo(self.world_to_screen(pts[0][0], pts[0][1]))
-                for p in pts[1:]: path.lineTo(self.world_to_screen(p[0], p[1]))
-                painter.drawPath(path)
+                self._draw_pts_path(painter, pts)
             else:
                 painter.drawLine(self.world_to_screen(*self._tool_points[0]),
                                  self.world_to_screen(*cur))
@@ -596,12 +886,7 @@ class Canvas(QWidget):
                 rot   = math.degrees(math.atan2(float(cur[1]-center[1]),
                                                 float(cur[0]-center[0])))
                 dummy = PolygonEntity(center, self._polygon_sides, r, rot)
-                pts   = dummy.to_points()
-                path  = QPainterPath()
-                path.moveTo(self.world_to_screen(pts[0][0], pts[0][1]))
-                for p in pts[1:]: path.lineTo(self.world_to_screen(p[0], p[1]))
-                path.closeSubpath()
-                painter.drawPath(path)
+                self._draw_pts_path(painter, dummy.to_points(), closed=True)
 
         elif t == TOOL_SEMICIRCLE and self._tool_points:
             center = self._tool_points[0]
@@ -610,11 +895,7 @@ class Canvas(QWidget):
                 bump  = math.degrees(math.atan2(float(cur[1]-center[1]),
                                                 float(cur[0]-center[0])))
                 dummy = SemiCircleEntity(center, r, (bump - 90) % 360)
-                pts   = dummy.to_points(32)
-                path  = QPainterPath()
-                path.moveTo(self.world_to_screen(pts[0][0], pts[0][1]))
-                for p in pts[1:]: path.lineTo(self.world_to_screen(p[0], p[1]))
-                painter.drawPath(path)
+                self._draw_pts_path(painter, dummy.to_points(32))
 
         elif t == TOOL_GROOVE:
             if self._groove_step == 1 and self._groove_c1 is not None:
@@ -628,23 +909,143 @@ class Canvas(QWidget):
                     mid  = (self._groove_c1 + self._groove_c2) / 2
                     r    = max(abs(float(np.dot(cur - mid, perp))), 0.5)
                     dummy = GrooveEntity(self._groove_c1, self._groove_c2, r)
-                    pts   = dummy.to_points(32)
-                    path  = QPainterPath()
-                    path.moveTo(self.world_to_screen(pts[0][0], pts[0][1]))
-                    for p in pts[1:]: path.lineTo(self.world_to_screen(p[0], p[1]))
-                    painter.drawPath(path)
+                    self._draw_pts_path(painter, dummy.to_points(32))
+
+        # ── Modify tools ──────────────────────────────────
+        elif t in (TOOL_MOVE, TOOL_COPY_TOOL) and self._mod_step == 1 \
+                and self._mod_base is not None:
+            delta = cur - self._mod_base
+            painter.setOpacity(0.55)
+            for e in self.document.selected_entities():
+                clone = e.clone()
+                clone.translate(float(delta[0]), float(delta[1]))
+                self._draw_entity(painter, clone)
+            painter.setOpacity(1.0)
+            # Show delta
+            painter.setPen(QPen(QColor("#E55A28"), 1.0, Qt.DotLine))
+            painter.drawLine(self.world_to_screen(*self._mod_base),
+                             self.world_to_screen(*cur))
+            painter.setPen(QColor("#E55A28"))
+            painter.setFont(QFont("Segoe UI", 8))
+            ps = self.world_to_screen(*cur)
+            painter.drawText(QPointF(ps.x() + 6, ps.y() - 6),
+                             f"Δ {float(delta[0]):.2f}, {float(delta[1]):.2f}")
+
+        elif t == TOOL_ROTATE and self._mod_step == 1 \
+                and self._mod_base is not None:
+            pivot = self._mod_base
+            cur_ang = math.degrees(math.atan2(float(cur[1] - pivot[1]),
+                                              float(cur[0] - pivot[0])))
+            rotation = cur_ang - self._mod_ref_angle
+            pivot_s  = self.world_to_screen(*pivot)
+            cur_s    = self.world_to_screen(*cur)
+            painter.setPen(QPen(QColor("#E55A28"), 1.0, Qt.DotLine))
+            painter.drawLine(pivot_s, cur_s)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(pivot_s, 6, 6)
+            painter.setOpacity(0.55)
+            for e in self.document.selected_entities():
+                clone = e.clone()
+                clone.rotate(rotation, pivot)
+                self._draw_entity(painter, clone)
+            painter.setOpacity(1.0)
+            painter.setPen(QColor("#E55A28"))
+            painter.setFont(QFont("Segoe UI", 8))
+            painter.drawText(QPointF(pivot_s.x() + 10, pivot_s.y() - 10),
+                             f"{rotation:.1f}°")
+
+        elif t == TOOL_MIRROR and self._mod_step == 1 \
+                and self._mod_base is not None:
+            axis_p1 = self._mod_base
+            axis_p2 = cur
+            axis_s1  = self.world_to_screen(*axis_p1)
+            axis_s2  = self.world_to_screen(*axis_p2)
+            painter.setPen(QPen(QColor("#2266BB"), 1.0, Qt.DotLine))
+            painter.drawLine(axis_s1, axis_s2)
+            if float(np.linalg.norm(axis_p2 - axis_p1)) > 1e-6:
+                painter.setOpacity(0.55)
+                for e in self.document.selected_entities():
+                    clone = e.clone()
+                    self._mirror_entity(clone, axis_p1, axis_p2)
+                    self._draw_entity(painter, clone)
+                painter.setOpacity(1.0)
+
+        elif t == TOOL_OFFSET and self._mod_step == 1 \
+                and self._mod_entity is not None:
+            e     = self._mod_entity
+            dist  = self._offset_distance(e, cur)
+            clone = self._compute_offset(e, dist)
+            if clone is not None:
+                painter.setOpacity(0.7)
+                self._draw_entity(painter, clone)
+                painter.setOpacity(1.0)
+                painter.setPen(QColor("#E55A28"))
+                painter.setFont(QFont("Segoe UI", 8))
+                cs = self.world_to_screen(*cur)
+                painter.drawText(QPointF(cs.x() + 6, cs.y() - 6), f"{abs(dist):.2f} mm")
+
+        elif t == TOOL_FILLET and self._mod_step == 1 \
+                and self._mod_entity is not None:
+            # Highlight first selected entity
+            sel_pen = QPen(QColor("#E55A28"), 2.5)
+            sel_pen.setCosmetic(True)
+            painter.setPen(sel_pen)
+            painter.setBrush(Qt.NoBrush)
+            if isinstance(self._mod_entity, LineEntity):
+                painter.drawLine(
+                    self.world_to_screen(*self._mod_entity.start),
+                    self.world_to_screen(*self._mod_entity.end))
+
+        elif t == TOOL_CHAMFER and self._mod_step == 1 \
+                and self._mod_entity is not None:
+            sel_pen = QPen(QColor("#E55A28"), 2.5)
+            sel_pen.setCosmetic(True)
+            painter.setPen(sel_pen)
+            if isinstance(self._mod_entity, LineEntity):
+                painter.drawLine(
+                    self.world_to_screen(*self._mod_entity.start),
+                    self.world_to_screen(*self._mod_entity.end))
+
+        # ── Dimension tools ───────────────────────────────
+        elif t == TOOL_DIM_LINEAR:
+            if self._dim_step == 1 and self._dim_p1 is not None:
+                painter.drawLine(self.world_to_screen(*self._dim_p1),
+                                 self.world_to_screen(*cur))
+            elif self._dim_step == 2 and self._dim_p1 is not None \
+                    and self._dim_p2 is not None:
+                off_w = self._dim_offset_from_cursor(self._dim_p1, self._dim_p2, cur)
+                dummy = DimLinearEntity(self._dim_p1, self._dim_p2, off_w)
+                self._draw_dim_linear(painter, dummy)
+
+        elif t == TOOL_DIM_RADIAL and self._dim_step == 1 \
+                and self._dim_p1 is not None and self._mod_entity is not None:
+            e = self._mod_entity
+            if isinstance(e, (CircleEntity, ArcEntity)):
+                ang = math.degrees(math.atan2(
+                    float(cur[1] - e.center[1]), float(cur[0] - e.center[0])))
+                dummy = DimRadialEntity(e.center, e.radius, ang)
+                self._draw_dim_radial(painter, dummy)
+
+    def _draw_pts_path(self, painter: QPainter, pts, closed=False):
+        if len(pts) < 2:
+            return
+        path = QPainterPath()
+        path.moveTo(self.world_to_screen(pts[0][0], pts[0][1]))
+        for p in pts[1:]:
+            path.lineTo(self.world_to_screen(p[0], p[1]))
+        if closed:
+            path.closeSubpath()
+        painter.drawPath(path)
 
     def _draw_snap_indicator(self, painter: QPainter, point: np.ndarray):
         sp  = self.world_to_screen(point[0], point[1])
-        pen = QPen(QColor("#E55A28"), 2.0)
-        pen.setCosmetic(True)
+        pen = QPen(QColor("#E55A28"), 2.0); pen.setCosmetic(True)
         painter.setPen(pen)
         painter.setBrush(Qt.NoBrush)
         painter.drawEllipse(sp, 6.0, 6.0)
 
     def _draw_rubber_band(self, painter: QPainter):
-        pen = QPen(QColor("#E55A28"), 1.5, Qt.DashLine)
-        pen.setCosmetic(True)
+        pen = QPen(QColor("#E55A28"), 1.5, Qt.DashLine); pen.setCosmetic(True)
         painter.setPen(pen)
         painter.setBrush(QBrush(QColor(229, 90, 40, 25)))
         p1, p2 = self._rubber_start_px, self._rubber_end_px
@@ -660,11 +1061,9 @@ class Canvas(QWidget):
 
         if event.button() == Qt.MiddleButton:
             self._start_pan(pos.toPoint()); return
-
         if event.button() == Qt.LeftButton and \
                 QApplication.keyboardModifiers() & Qt.Key_Space:
             self._start_pan(pos.toPoint()); return
-
         if event.button() == Qt.LeftButton:
             self._handle_left_click(snapped, world, pos.toPoint(), event.modifiers())
 
@@ -677,7 +1076,6 @@ class Canvas(QWidget):
         self.cursor_moved.emit(float(self._snap_result.point[0]),
                                float(self._snap_result.point[1]))
 
-        # Pan
         if self._panning and self._pan_start_px and self._pan_start_offset:
             dx = pos.x() - self._pan_start_px.x()
             dy = pos.y() - self._pan_start_px.y()
@@ -685,14 +1083,12 @@ class Canvas(QWidget):
                                        self._pan_start_offset.y() + dy)
             self.update(); return
 
-        # Image drag
         if self._dragging_image is not None:
             new_pos = world - self._drag_img_offset
             self._dragging_image.world_x = float(new_pos[0])
             self._dragging_image.world_y = float(new_pos[1])
             self.update(); return
 
-        # Rubber-band
         if self._rubber_start_px and self._tool == TOOL_SELECT:
             self._rubber_end_px = pos.toPoint()
 
@@ -701,16 +1097,13 @@ class Canvas(QWidget):
     def mouseReleaseEvent(self, event: QMouseEvent):
         if event.button() == Qt.MiddleButton:
             self._panning = False; return
-
         if self._panning:
             self._panning = False
             self.setCursor(Qt.CrossCursor if self._tool != TOOL_SELECT else Qt.ArrowCursor)
             return
-
         if self._dragging_image is not None:
             self._dragging_image = None
             self.update(); return
-
         if event.button() == Qt.LeftButton and self._tool == TOOL_SELECT:
             if self._rubber_start_px and self._rubber_end_px:
                 self._finish_rubber_band_select(event.modifiers())
@@ -740,7 +1133,7 @@ class Canvas(QWidget):
             self._cancel_tool()
             self.set_tool(TOOL_SELECT)
 
-    # ── Tool click handlers ───────────────────────────────────
+    # ── Tool click dispatch ───────────────────────────────────
 
     def _handle_left_click(self, snapped: np.ndarray, raw_world: np.ndarray,
                             screen_pos: QPoint, modifiers):
@@ -748,6 +1141,10 @@ class Canvas(QWidget):
 
         if t == TOOL_SELECT:
             self._handle_select_click(snapped, raw_world, screen_pos, modifiers)
+
+        # ── Drawing ───────────────────────────────────────
+        elif t == TOOL_POINT:
+            self._commit(PointEntity(snapped.copy()))
 
         elif t == TOOL_LINE:
             if not self._tool_points:
@@ -820,24 +1217,61 @@ class Canvas(QWidget):
         elif t == TOOL_GROOVE:
             self._handle_groove_click(snapped)
 
+        elif t == TOOL_TEXT:
+            self._handle_text_click(snapped)
+
+        # ── Modify ────────────────────────────────────────
+        elif t in (TOOL_MOVE, TOOL_COPY_TOOL):
+            self._handle_move_click(snapped)
+
+        elif t == TOOL_ROTATE:
+            self._handle_rotate_click(snapped, raw_world)
+
+        elif t == TOOL_MIRROR:
+            self._handle_mirror_click(snapped)
+
+        elif t == TOOL_OFFSET:
+            self._handle_offset_click(snapped, raw_world)
+
+        elif t == TOOL_TRIM:
+            self._handle_trim_click(snapped)
+
+        elif t == TOOL_EXTEND:
+            self._handle_extend_click(snapped)
+
+        elif t == TOOL_FILLET:
+            self._handle_fillet_click(snapped)
+
+        elif t == TOOL_CHAMFER:
+            self._handle_chamfer_click(snapped)
+
+        elif t == TOOL_BREAK:
+            self._handle_break_click(snapped)
+
+        # ── Annotation ────────────────────────────────────
+        elif t == TOOL_DIM_LINEAR:
+            self._handle_dim_linear_click(snapped)
+
+        elif t == TOOL_DIM_RADIAL:
+            self._handle_dim_radial_click(snapped)
+
         self.update()
 
+    # ── Select ────────────────────────────────────────────────
+
     def _handle_select_click(self, snapped, raw_world, screen_pos, modifiers):
-        # 1. Check images first
         img_hit = self._hit_test_image(raw_world)
         if img_hit and not img_hit.locked:
             for i in self._images: i.selected = False
             img_hit.selected = True
-            self._dragging_image   = img_hit
-            self._drag_img_offset  = raw_world - np.array([img_hit.world_x, img_hit.world_y])
+            self._dragging_image  = img_hit
+            self._drag_img_offset = raw_world - np.array([img_hit.world_x, img_hit.world_y])
             self.document.deselect_all()
             self.selection_changed.emit([])
             self.update(); return
 
-        # 2. Deselect images
         for i in self._images: i.selected = False
 
-        # 3. Entity hit test
         hit = self._hit_test(snapped)
         if hit:
             if not (modifiers & Qt.ShiftModifier):
@@ -851,6 +1285,8 @@ class Canvas(QWidget):
             self._rubber_start_px = screen_pos
             self._rubber_end_px   = screen_pos
         self.update()
+
+    # ── Arc ───────────────────────────────────────────────────
 
     def _handle_arc_click(self, snapped):
         if self._arc_step == 0:
@@ -869,6 +1305,8 @@ class Canvas(QWidget):
                                        self._arc_start_angle, ea))
             self._arc_step = 0; self._arc_center = None
 
+    # ── Groove ────────────────────────────────────────────────
+
     def _handle_groove_click(self, snapped):
         if self._groove_step == 0:
             self._groove_c1 = snapped.copy(); self._groove_step = 1
@@ -882,8 +1320,493 @@ class Canvas(QWidget):
                 perp = np.array([-axis[1], axis[0]]) / aln
                 r    = max(abs(float(np.dot(snapped - (c1+c2)/2, perp))), 0.5)
                 self._commit(GrooveEntity(c1, c2, r))
-            self._groove_step = 0
-            self._groove_c1 = self._groove_c2 = None
+            self._groove_step = 0; self._groove_c1 = self._groove_c2 = None
+
+    # ── Text ──────────────────────────────────────────────────
+
+    def _handle_text_click(self, snapped):
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QFormLayout, QLineEdit, QDoubleSpinBox, QPushButton, QHBoxLayout
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Insert Text")
+        dlg.setModal(True)
+        dlg.setStyleSheet("QDialog{background:#F8F9FA;} QLabel{color:#1A1A24;font-size:13px;}")
+        form = QFormLayout(dlg)
+        form.setContentsMargins(14, 14, 14, 14)
+        form.setSpacing(8)
+        txt_edit = QLineEdit()
+        txt_edit.setStyleSheet("background:#FFFFFF;border:1px solid #E0E0E0;border-radius:3px;padding:4px 8px;font-size:13px;")
+        h_spin = QDoubleSpinBox()
+        h_spin.setRange(0.1, 1000); h_spin.setValue(5.0); h_spin.setSuffix(" mm")
+        h_spin.setStyleSheet("background:#FFFFFF;border:1px solid #E0E0E0;border-radius:3px;padding:4px 8px;font-size:13px;")
+        form.addRow("Text:", txt_edit)
+        form.addRow("Height:", h_spin)
+        row = QHBoxLayout(); row.addStretch()
+        ok = QPushButton("Add"); ok.setDefault(True)
+        ok.setStyleSheet("QPushButton{background:#E55A28;color:#FFFFFF;border:none;border-radius:4px;padding:5px 16px;font-size:13px;font-weight:600;} QPushButton:hover{background:#CC4D22;}")
+        ok.clicked.connect(dlg.accept)
+        cancel = QPushButton("Cancel")
+        cancel.setStyleSheet("QPushButton{background:#FFF;color:#1A1A24;border:1px solid #E0E0E0;border-radius:4px;padding:5px 14px;font-size:13px;} QPushButton:hover{background:#F0F2F5;}")
+        cancel.clicked.connect(dlg.reject)
+        row.addWidget(cancel); row.addWidget(ok)
+        form.addRow(row)
+        txt_edit.setFocus()
+        if dlg.exec() == QDialog.Accepted and txt_edit.text().strip():
+            self._commit(TextEntity(snapped.copy(), txt_edit.text().strip(),
+                                    h_spin.value()))
+
+    # ── Move / Copy ───────────────────────────────────────────
+
+    def _handle_move_click(self, snapped):
+        is_copy = self._tool == TOOL_COPY_TOOL
+        if self._mod_step == 0:
+            if not self.document.selected_entities():
+                hit = self._hit_test(snapped)
+                if hit:
+                    self.document.deselect_all()
+                    hit.selected = True
+                    self.selection_changed.emit([hit])
+            if self.document.selected_entities():
+                self._mod_base = snapped.copy()
+                self._mod_step = 1
+        else:
+            delta = snapped - self._mod_base
+            snap  = self.document.begin_operation()
+            if is_copy:
+                new_ents = []
+                for e in self.document.selected_entities():
+                    clone = e.clone()
+                    clone.translate(float(delta[0]), float(delta[1]))
+                    clone.selected = False
+                    new_ents.append(clone)
+                for ne in new_ents:
+                    self.document.entities.append(ne)
+            else:
+                for e in self.document.selected_entities():
+                    e.translate(float(delta[0]), float(delta[1]))
+            self.document.commit_operation(snap)
+            self._mod_step = 0; self._mod_base = None
+            self.selection_changed.emit(self.document.selected_entities())
+            self.entity_added.emit(None)
+
+    # ── Rotate ────────────────────────────────────────────────
+
+    def _handle_rotate_click(self, snapped, raw_world):
+        if self._mod_step == 0:
+            self._mod_base = snapped.copy()
+            self._mod_ref_angle = math.degrees(
+                math.atan2(float(raw_world[1] - snapped[1]),
+                           float(raw_world[0] - snapped[0])))
+            self._mod_step = 1
+        else:
+            pivot = self._mod_base
+            cur_ang = math.degrees(math.atan2(float(snapped[1] - pivot[1]),
+                                              float(snapped[0] - pivot[0])))
+            rotation = cur_ang - self._mod_ref_angle
+            snap = self.document.begin_operation()
+            for e in self.document.selected_entities():
+                e.rotate(rotation, pivot)
+            self.document.commit_operation(snap)
+            self._mod_step = 0; self._mod_base = None
+            self.selection_changed.emit(self.document.selected_entities())
+            self.entity_added.emit(None)
+
+    # ── Mirror ────────────────────────────────────────────────
+
+    def _handle_mirror_click(self, snapped):
+        if self._mod_step == 0:
+            self._mod_base = snapped.copy()
+            self._mod_step = 1
+        else:
+            axis_p1 = self._mod_base
+            axis_p2 = snapped
+            if float(np.linalg.norm(axis_p2 - axis_p1)) < 1e-6:
+                return
+            snap = self.document.begin_operation()
+            for e in self.document.selected_entities():
+                self._mirror_entity(e, axis_p1, axis_p2)
+            self.document.commit_operation(snap)
+            self._mod_step = 0; self._mod_base = None
+            self.selection_changed.emit(self.document.selected_entities())
+            self.entity_added.emit(None)
+
+    def _mirror_entity(self, e: Entity, p1: np.ndarray, p2: np.ndarray):
+        """Reflect entity across axis p1→p2 in-place."""
+        if isinstance(e, LineEntity):
+            e.start = mirror_point(e.start, p1, p2)
+            e.end   = mirror_point(e.end,   p1, p2)
+        elif isinstance(e, PolylineEntity):
+            e.points = [mirror_point(p, p1, p2) for p in e.points]
+        elif isinstance(e, RectangleEntity):
+            e.corner1 = mirror_point(e.corner1, p1, p2)
+            e.corner2 = mirror_point(e.corner2, p1, p2)
+        elif isinstance(e, CircleEntity):
+            e.center = mirror_point(e.center, p1, p2)
+        elif isinstance(e, ArcEntity):
+            e.center      = mirror_point(e.center, p1, p2)
+            # Mirror angles
+            axis_ang = math.degrees(math.atan2(float(p2[1]-p1[1]), float(p2[0]-p1[0])))
+            sa = (2 * axis_ang - e.start_angle) % 360
+            ea = (2 * axis_ang - e.end_angle) % 360
+            e.start_angle, e.end_angle = ea, sa   # swap to keep CCW
+        elif isinstance(e, SplineEntity):
+            e.control_points = [mirror_point(p, p1, p2) for p in e.control_points]
+        elif isinstance(e, PolygonEntity):
+            e.center = mirror_point(e.center, p1, p2)
+        elif isinstance(e, EllipseEntity):
+            e.center = mirror_point(e.center, p1, p2)
+        elif isinstance(e, SemiCircleEntity):
+            e.center    = mirror_point(e.center, p1, p2)
+            axis_ang    = math.degrees(math.atan2(float(p2[1]-p1[1]), float(p2[0]-p1[0])))
+            e.flat_angle = (2 * axis_ang - e.flat_angle) % 360
+        elif isinstance(e, GrooveEntity):
+            e.center1 = mirror_point(e.center1, p1, p2)
+            e.center2 = mirror_point(e.center2, p1, p2)
+        elif isinstance(e, PointEntity):
+            e.position = mirror_point(e.position, p1, p2)
+        elif isinstance(e, TextEntity):
+            e.position = mirror_point(e.position, p1, p2)
+
+    # ── Offset ────────────────────────────────────────────────
+
+    def _handle_offset_click(self, snapped, raw_world):
+        if self._mod_step == 0:
+            hit = self._hit_test(raw_world)
+            if hit and isinstance(hit, (LineEntity, PolylineEntity,
+                                        CircleEntity, ArcEntity)):
+                self.document.deselect_all()
+                hit.selected = True
+                self._mod_entity = hit
+                self._mod_step   = 1
+        else:
+            e    = self._mod_entity
+            dist = self._offset_distance(e, snapped)
+            clone = self._compute_offset(e, dist)
+            if clone is not None:
+                snap = self.document.begin_operation()
+                self.document.add_entity(clone, push_undo=False)
+                self.document.commit_operation(snap)
+                self.entity_added.emit(clone)
+            self._mod_step = 0; self._mod_entity = None
+            self.document.deselect_all()
+            self.selection_changed.emit([])
+
+    def _offset_distance(self, e: Entity, cursor: np.ndarray) -> float:
+        """Signed offset distance from cursor to entity (positive = left)."""
+        if isinstance(e, LineEntity):
+            d = e.end - e.start
+            perp = np.array([-d[1], d[0]])
+            l = float(np.linalg.norm(perp))
+            if l < 1e-10:
+                return 0.0
+            perp /= l
+            mid = (e.start + e.end) / 2
+            raw = float(np.dot(cursor - mid, perp))
+            dist = float(np.linalg.norm(cursor - e.nearest_point(cursor)))
+            return dist if raw > 0 else -dist
+        elif isinstance(e, PolylineEntity) and len(e.points) >= 2:
+            mid = e.points[len(e.points)//2]
+            d   = e.points[len(e.points)//2] - e.points[len(e.points)//2 - 1]
+            perp = np.array([-d[1], d[0]])
+            l = float(np.linalg.norm(perp))
+            if l < 1e-10:
+                return float(np.linalg.norm(cursor - mid))
+            perp /= l
+            raw  = float(np.dot(cursor - mid, perp))
+            dist = float(np.linalg.norm(cursor - e.nearest_point(cursor)))
+            return dist if raw > 0 else -dist
+        elif isinstance(e, CircleEntity):
+            d = float(np.linalg.norm(cursor - e.center))
+            return d - e.radius
+        elif isinstance(e, ArcEntity):
+            d = float(np.linalg.norm(cursor - e.center))
+            return d - e.radius
+        return 0.0
+
+    def _compute_offset(self, e: Entity, dist: float) -> Optional[Entity]:
+        if abs(dist) < 1e-6:
+            return None
+        if isinstance(e, LineEntity):
+            p1, p2 = offset_segment(e.start, e.end, dist)
+            ne = LineEntity(p1, p2)
+        elif isinstance(e, PolylineEntity):
+            pts = offset_polyline(e.points, dist, e.closed)
+            if len(pts) < 2:
+                return None
+            ne = PolylineEntity([np.array(p) for p in pts], e.closed)
+        elif isinstance(e, CircleEntity):
+            new_r = e.radius + dist
+            if new_r < 1e-6:
+                return None
+            ne = CircleEntity(e.center.copy(), new_r)
+        elif isinstance(e, ArcEntity):
+            new_r = e.radius + dist
+            if new_r < 1e-6:
+                return None
+            ne = ArcEntity(e.center.copy(), new_r, e.start_angle, e.end_angle)
+        else:
+            return None
+        ne.layer = e.layer
+        ne.color = e.color
+        return ne
+
+    # ── Trim ──────────────────────────────────────────────────
+
+    def _handle_trim_click(self, snapped):
+        hit = self._hit_test(snapped)
+        if hit is None or not isinstance(hit, LineEntity):
+            return
+        ts = t_values_on_line(hit.start, hit.end,
+                              self.document.visible_entities(), hit.id)
+        if not ts:
+            return
+        # Find t of click
+        d   = hit.end - hit.start
+        dl2 = float(np.dot(d, d))
+        if dl2 < 1e-12:
+            return
+        t_click = float(np.dot(snapped - hit.start, d)) / dl2
+
+        all_t = sorted(set([0.0] + ts + [1.0]))
+        snap = self.document.begin_operation()
+        self.document.entities = [e for e in self.document.entities if e.id != hit.id]
+        for i in range(len(all_t) - 1):
+            t0, t1 = all_t[i], all_t[i + 1]
+            if t0 <= t_click <= t1:
+                continue    # this segment is trimmed away
+            if t1 - t0 < 1e-9:
+                continue
+            p0 = hit.start + t0 * d
+            p1 = hit.start + t1 * d
+            ne = LineEntity(p0, p1)
+            ne.layer = hit.layer; ne.color = hit.color
+            self.document.entities.append(ne)
+        self.document.commit_operation(snap)
+        self.document.deselect_all()
+        self.selection_changed.emit([])
+        self.entity_added.emit(None)
+
+    # ── Extend ────────────────────────────────────────────────
+
+    def _handle_extend_click(self, snapped):
+        if self._mod_step == 0:
+            # Click near endpoint of entity to extend
+            hit = self._hit_test(snapped)
+            if hit and isinstance(hit, LineEntity):
+                self._mod_entity = hit
+                self._mod_step   = 1
+        else:
+            target = self._hit_test(snapped)
+            src    = self._mod_entity
+            if target and isinstance(src, LineEntity):
+                self._do_extend(src, snapped, target)
+            self._mod_step = 0; self._mod_entity = None
+
+    def _do_extend(self, src: LineEntity, click_pt: np.ndarray, target: Entity):
+        """Extend src to first intersection with target."""
+        intersections = []
+        if isinstance(target, LineEntity):
+            res = line_line_intersect(src.start, src.end, target.start, target.end)
+            if res:
+                t, u, pt = res
+                if 0.0 <= u <= 1.0:
+                    intersections.append((t, pt))
+        elif isinstance(target, CircleEntity):
+            for t, pt in circle_line_t(target.center, target.radius, src.start, src.end):
+                intersections.append((t, pt))
+
+        if not intersections:
+            return
+
+        # Determine which end is closer to click
+        d    = src.end - src.start
+        dl2  = float(np.dot(d, d))
+        t_click = float(np.dot(click_pt - src.start, d)) / max(dl2, 1e-12)
+
+        if t_click > 0.5:
+            # Extend end
+            best = max(intersections, key=lambda x: x[0])
+        else:
+            # Extend start
+            best = min(intersections, key=lambda x: x[0])
+
+        t_val, new_pt = best
+        snap = self.document.begin_operation()
+        if t_click > 0.5:
+            src.end = new_pt
+        else:
+            src.start = new_pt
+        self.document.commit_operation(snap)
+        self.selection_changed.emit(self.document.selected_entities())
+        self.entity_added.emit(None)
+
+    # ── Fillet ────────────────────────────────────────────────
+
+    def _handle_fillet_click(self, snapped):
+        if self._mod_step == 0:
+            hit = self._hit_test(snapped)
+            if hit and isinstance(hit, LineEntity):
+                self._mod_entity = hit
+                self._mod_step   = 1
+        else:
+            hit2 = self._hit_test(snapped)
+            src  = self._mod_entity
+            if hit2 and isinstance(src, LineEntity) and isinstance(hit2, LineEntity) \
+                    and hit2 is not src:
+                self._do_fillet(src, hit2)
+            self._mod_step = 0; self._mod_entity = None
+
+    def _do_fillet(self, e1: LineEntity, e2: LineEntity):
+        radius, ok = QInputDialog.getDouble(
+            self, "Fillet Radius", "Radius (mm):", 5.0, 0.01, 10000.0, 2)
+        if not ok or radius < 1e-6:
+            return
+        result = fillet_lines(e1.start, e1.end, e2.start, e2.end, radius)
+        if result is None:
+            return
+        tp1, tp2, arc_center, arc_sa, arc_ea, corner = result
+        snap = self.document.begin_operation()
+        # Trim line 1 to tp1
+        e1.end = tp1
+        # Trim line 2 start to tp2
+        e2.start = tp2
+        # Add fillet arc
+        arc = ArcEntity(arc_center, radius, arc_sa, arc_ea)
+        arc.layer = e1.layer; arc.color = e1.color
+        self.document.add_entity(arc, push_undo=False)
+        self.document.commit_operation(snap)
+        self.entity_added.emit(arc)
+
+    # ── Chamfer ───────────────────────────────────────────────
+
+    def _handle_chamfer_click(self, snapped):
+        if self._mod_step == 0:
+            hit = self._hit_test(snapped)
+            if hit and isinstance(hit, LineEntity):
+                self._mod_entity = hit
+                self._mod_step   = 1
+        else:
+            hit2 = self._hit_test(snapped)
+            src  = self._mod_entity
+            if hit2 and isinstance(src, LineEntity) and isinstance(hit2, LineEntity) \
+                    and hit2 is not src:
+                self._do_chamfer(src, hit2)
+            self._mod_step = 0; self._mod_entity = None
+
+    def _do_chamfer(self, e1: LineEntity, e2: LineEntity):
+        d1, ok1 = QInputDialog.getDouble(
+            self, "Chamfer", "Distance 1 (mm):", 5.0, 0.01, 10000.0, 2)
+        if not ok1:
+            return
+        d2, ok2 = QInputDialog.getDouble(
+            self, "Chamfer", "Distance 2 (mm):", d1, 0.01, 10000.0, 2)
+        if not ok2:
+            return
+        result = chamfer_lines(e1.start, e1.end, e2.start, e2.end, d1, d2)
+        if result is None:
+            return
+        tp1, tp2, corner = result
+        snap = self.document.begin_operation()
+        e1.end   = tp1
+        e2.start = tp2
+        chamfer_line = LineEntity(tp1, tp2)
+        chamfer_line.layer = e1.layer; chamfer_line.color = e1.color
+        self.document.add_entity(chamfer_line, push_undo=False)
+        self.document.commit_operation(snap)
+        self.entity_added.emit(chamfer_line)
+
+    # ── Break ─────────────────────────────────────────────────
+
+    def _handle_break_click(self, snapped):
+        hit = self._hit_test(snapped)
+        if hit is None:
+            return
+        snap = self.document.begin_operation()
+        if isinstance(hit, LineEntity):
+            d   = hit.end - hit.start
+            dl2 = float(np.dot(d, d))
+            if dl2 < 1e-12:
+                return
+            t = max(0.001, min(0.999,
+                    float(np.dot(snapped - hit.start, d)) / dl2))
+            mid = hit.start + t * d
+            # Replace with two lines
+            self.document.entities = [e for e in self.document.entities
+                                       if e.id != hit.id]
+            for p1, p2 in [(hit.start, mid), (mid, hit.end)]:
+                ne = LineEntity(p1, p2)
+                ne.layer = hit.layer; ne.color = hit.color
+                self.document.entities.append(ne)
+        elif isinstance(hit, PolylineEntity) and len(hit.points) >= 2:
+            # Find nearest segment
+            best_i = 0; best_dist = float("inf")
+            for i in range(len(hit.points) - 1):
+                seg_d = hit.points[i+1] - hit.points[i]
+                lsq   = float(np.dot(seg_d, seg_d))
+                if lsq < 1e-12:
+                    continue
+                tt = max(0.0, min(1.0, float(np.dot(snapped - hit.points[i], seg_d)) / lsq))
+                near = hit.points[i] + tt * seg_d
+                dist = float(np.linalg.norm(snapped - near))
+                if dist < best_dist:
+                    best_dist = dist; best_i = i
+            mid = hit.points[best_i] + 0.5 * (hit.points[best_i+1] - hit.points[best_i])
+            pts1 = hit.points[:best_i+1] + [mid]
+            pts2 = [mid] + hit.points[best_i+1:]
+            self.document.entities = [e for e in self.document.entities if e.id != hit.id]
+            for pts in [pts1, pts2]:
+                if len(pts) >= 2:
+                    ne = PolylineEntity(pts)
+                    ne.layer = hit.layer; ne.color = hit.color
+                    self.document.entities.append(ne)
+        self.document.commit_operation(snap)
+        self.document.deselect_all()
+        self.selection_changed.emit([])
+        self.entity_added.emit(None)
+
+    # ── Linear Dimension ──────────────────────────────────────
+
+    def _handle_dim_linear_click(self, snapped):
+        if self._dim_step == 0:
+            self._dim_p1  = snapped.copy()
+            self._dim_step = 1
+        elif self._dim_step == 1:
+            self._dim_p2  = snapped.copy()
+            self._dim_step = 2
+        else:
+            off_w = self._dim_offset_from_cursor(self._dim_p1, self._dim_p2, snapped)
+            self._commit(DimLinearEntity(self._dim_p1, self._dim_p2, off_w))
+            self._dim_step = 0; self._dim_p1 = self._dim_p2 = None
+
+    def _dim_offset_from_cursor(self, p1: np.ndarray, p2: np.ndarray,
+                                  cursor: np.ndarray) -> float:
+        """Signed distance from the p1-p2 line to cursor (used as dim offset)."""
+        d = p2 - p1
+        l = float(np.linalg.norm(d))
+        if l < 1e-10:
+            return 10.0
+        perp = np.array([-d[1], d[0]]) / l
+        return float(np.dot(cursor - p1, perp))
+
+    # ── Radial Dimension ──────────────────────────────────────
+
+    def _handle_dim_radial_click(self, snapped):
+        if self._dim_step == 0:
+            hit = self._hit_test(snapped)
+            if hit and isinstance(hit, (CircleEntity, ArcEntity)):
+                self._mod_entity = hit
+                self._dim_p1     = snapped.copy()
+                self._dim_step   = 1
+        else:
+            e = self._mod_entity
+            if e and isinstance(e, (CircleEntity, ArcEntity)):
+                ang = math.degrees(math.atan2(
+                    float(snapped[1] - e.center[1]),
+                    float(snapped[0] - e.center[0])))
+                is_dia = isinstance(e, CircleEntity)
+                self._commit(DimRadialEntity(e.center, e.radius, ang, is_dia))
+            self._dim_step = 0; self._dim_p1 = None; self._mod_entity = None
+
+    # ── Finish polyline / spline ──────────────────────────────
 
     def _finish_polyline(self):
         if len(self._tool_points) >= 2:
@@ -936,7 +1859,7 @@ class Canvas(QWidget):
                 return img
         return None
 
-    # ── Helpers ───────────────────────────────────────────────
+    # ── Commit / Helpers ──────────────────────────────────────
 
     def _commit(self, entity: Entity):
         snap = self.document.begin_operation()
@@ -951,8 +1874,10 @@ class Canvas(QWidget):
         self.setCursor(Qt.ClosedHandCursor)
 
     def _cancel_tool(self):
-        self._tool_points = []
-        self._arc_step    = 0;   self._arc_center   = None
-        self._groove_step = 0;   self._groove_c1    = self._groove_c2 = None
+        self._tool_points  = []
+        self._arc_step     = 0;   self._arc_center   = None
+        self._groove_step  = 0;   self._groove_c1    = self._groove_c2 = None
+        self._mod_step     = 0;   self._mod_base     = None; self._mod_entity = None
+        self._dim_step     = 0;   self._dim_p1       = self._dim_p2 = None
         self._rubber_start_px = self._rubber_end_px = None
         self._dragging_image  = None

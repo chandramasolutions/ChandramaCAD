@@ -6,6 +6,7 @@ from core.entities import (
     Entity, LineEntity, PolylineEntity, RectangleEntity,
     CircleEntity, ArcEntity, SplineEntity,
     PolygonEntity, EllipseEntity, SemiCircleEntity, GrooveEntity,
+    PointEntity, TextEntity, DimLinearEntity, DimRadialEntity,
 )
 import numpy as np
 
@@ -212,6 +213,22 @@ class Document:
                 d["center1"] = list(e.center1)
                 d["center2"] = list(e.center2)
                 d["radius"] = e.radius
+            elif isinstance(e, PointEntity):
+                d["position"] = list(e.position)
+            elif isinstance(e, TextEntity):
+                d["position"] = list(e.position)
+                d["text"] = e.text
+                d["height"] = e.height
+                d["rotation_deg"] = e.rotation_deg
+            elif isinstance(e, DimLinearEntity):
+                d["p1"] = list(e.p1)
+                d["p2"] = list(e.p2)
+                d["offset"] = e.offset
+            elif isinstance(e, DimRadialEntity):
+                d["center"] = list(e.center)
+                d["radius"] = e.radius
+                d["angle_deg"] = e.angle_deg
+                d["is_diameter"] = e.is_diameter
             return d
 
         return {
@@ -256,6 +273,17 @@ class Document:
             elif t == "GrooveEntity":
                 e = GrooveEntity(np.array(ed["center1"]), np.array(ed["center2"]),
                                  ed["radius"])
+            elif t == "PointEntity":
+                e = PointEntity(np.array(ed["position"]))
+            elif t == "TextEntity":
+                e = TextEntity(np.array(ed["position"]), ed["text"],
+                               ed.get("height", 5.0), ed.get("rotation_deg", 0.0))
+            elif t == "DimLinearEntity":
+                e = DimLinearEntity(np.array(ed["p1"]), np.array(ed["p2"]),
+                                    ed.get("offset", 10.0))
+            elif t == "DimRadialEntity":
+                e = DimRadialEntity(np.array(ed["center"]), ed["radius"],
+                                    ed.get("angle_deg", 0.0), ed.get("is_diameter", False))
             if e is not None:
                 e.layer = ed.get("layer", "Default")
                 e.color = ed.get("color")
